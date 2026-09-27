@@ -1,0 +1,82 @@
+{
+  "_comment": [
+    "FRR, ping, and scope-refusal cases. The refusals live here rather than with",
+    "the SR Linux cases because they are properties of the allowlist, not of any",
+    "one platform."
+  ],
+  "cases": [
+    {
+      "name": "healthy FRR summary is ok",
+      "kind": "verify",
+      "command": "frr_bgp_summary",
+      "output_ref": "FRR_SUMMARY_HEALTHY",
+      "expect_ok": true
+    },
+    {
+      "name": "FRR peer with zero received prefixes is not ok",
+      "kind": "verify",
+      "command": "frr_bgp_summary",
+      "output_ref": "FRR_SUMMARY_UNHEALTHY",
+      "expect_ok": false,
+      "expect_mentions": ["pfxRcd"]
+    },
+    {
+      "name": "FRR with zero peers is never reported healthy",
+      "kind": "verify",
+      "command": "frr_bgp_summary",
+      "output_ref": "FRR_SUMMARY_EMPTY",
+      "expect_ok": false
+    },
+    {
+      "name": "malformed FRR payload is an input error, not a network fault",
+      "kind": "verify",
+      "command": "frr_bgp_summary",
+      "output_ref": "FRR_SUMMARY_MALFORMED",
+      "expect_ok": false,
+      "expect_outcome": "input_error"
+    },
+    {
+      "name": "reachable ping is ok",
+      "kind": "verify",
+      "command": "ping",
+      "output_ref": "PING_OK",
+      "expect_ok": true
+    },
+    {
+      "name": "total packet loss is not ok",
+      "kind": "verify",
+      "command": "ping",
+      "output_ref": "PING_TOTAL_LOSS",
+      "expect_ok": false
+    },
+    {
+      "name": "an out-of-scope command is refused",
+      "kind": "verify",
+      "command": "configure",
+      "output_ref": "SRL_INTERFACE_UP",
+      "expect_error_contains": "not in the allowlist"
+    },
+    {
+      "name": "a raw CLI string is refused rather than parsed",
+      "kind": "verify",
+      "command": "show interface brief",
+      "output_ref": "SRL_INTERFACE_UP",
+      "expect_error_contains": "not in the allowlist"
+    },
+    {
+      "name": "a missing required argument is refused",
+      "kind": "verify",
+      "command": "srl_interface_brief",
+      "output_ref": "SRL_INTERFACE_UP",
+      "expect_error_contains": "requires argument"
+    },
+    {
+      "name": "an argument invalid for the chosen command is refused, not dropped",
+      "kind": "verify",
+      "command": "srl_interface_brief",
+      "arguments": { "interface": "ethernet-1/1", "prefix": "10.0.0.2/32" },
+      "output_ref": "SRL_INTERFACE_UP",
+      "expect_error_contains": "does not accept"
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+"""Input validation: the actual security boundary.
+
+Design rule, taken from the flagship's own lesson: *the tool must be unable to
+cause harm, not merely unlikely to.* Three properties give that.
+
+1. **No device credentials exist in this process.** Nothing here opens a
+   socket, shells out, or holds a credential. The server is a pure function
+   over text the caller already has, so an agent cannot misuse it to change
+   device state - that capability is absent, not filtered.
+
+2. **The command set is a closed allowlist.** A caller names a command id from
+   the registry, never a free-form CLI string. "Only read-only commands" is
+   enforced by the type of the input rather than by a regex a prompt could talk
+   its way around.
+
+3. **Unknown arguments are refused, not dropped.** Silently ignoring an
+   argument the caller believed was applied would let it think it had
+   constrained something it did not.
+
+Refusals name the rule they broke, because an agent that gets a precise reason
+can correct itself, while one that gets a generic error retries blindly.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from . import registry
+from .errors import ScopeError
+from .sanitize import MAX_BYTES
+
+__all__ = ["ScopeError", "validate", "MAX_BYTES"]
+
+
+def _require_text(value: Any, field: str) -> str:
+    """Coerce a field to text, rejecting the types an agent should not send."""
+    if not isinstance(value, str):
+        raise ScopeError(f"{field} must be a string, got {type(value).__name__}")
+    text = value.strip()
+    if not text:
+        raise ScopeError(f"{field} must not be empty")
+    return text
+
+
+def validate(command: Any, output: Any, **arguments: Any) -> dict[str, Any]:
+    """Validate one request against the registry.
+
+    Returns a normalised request dict. Raises `ScopeError` (a `ValueError`)
+    with a message naming the violated rule.
+    """
+    if not isinstance(command, str):
+        raise ScopeError(f"command must be a string id, got {type(command).__name__}")
+
+    command_id = command.strip()
+    spec = registry.get(command_id)
+    if spec is None:
+        # Safe to list the legal ids: they are this library's own public
+        # vocabulary, and an agent that cannot enumerate them cannot use the
+        # tool at all.
+        raise ScopeError(
+            f"command {command_id!r} is not in the allowlist. Allowed ids: {sorted(registry.BY_ID)}"
+        )
+
+    if not isinstance(output, str):
+        raise ScopeError(f"output must be a string, got {type(output).__name__}")
+    size = len(output.encode("utf-8", errors="replace"))
+    if size > MAX_BYTES:
+        raise ScopeError(
+            f"output is {size} bytes, above the {MAX_BYTES}-byte cap. "
+            "Trim the device output to the relevant command's result."
+        )
+
+    known = spec.argument_names
+    unexpected = sorted(set(arguments) - known)
+    if unexpected:
+        raise ScopeError(
+            f"command {command_id!r} does not accept argument(s) {unexpected}. "
+            f"Accepted: {sorted(known)}"
+        )
+
+    missing = [name for name in spec.required if arguments.get(name) in (None, "")]
+    if missing:
+        raise ScopeError(
+            f"command {command_id!r} requires argument(s) {missing}. It checks: {spec.summary}"
+        )
+
+    resolved = {name: _require_text(arguments[name], name) for name in sorted(known)}
+    return {
+        "spec": spec,
+        "command_id": spec.id,
+        "command": spec.command,
+        "platform": spec.platform,
+        "output": output,
+        "arguments": resolved,
+    }

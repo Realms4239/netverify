@@ -1,0 +1,116 @@
+{
+  "_comment": [
+    "SR Linux verification cases: does the library report the backbone correctly?",
+    "",
+    "Model-free by design: fixed inputs, fixed expected results, no API key and",
+    "no network. That is what lets CI be green on every commit instead of",
+    "skipped when a secret is absent. Each case names a fixture via 'output_ref'",
+    "in tests/fixtures.py, so the expected text lives in one place.",
+    "'expect_absent' is the field that earns the gate: a case that passes while",
+    "leaking a secret into its own result is a failure, and no positive",
+    "assertion would catch that."
+  ],
+  "cases": [
+    {
+      "name": "healthy interface is reported ok",
+      "kind": "verify",
+      "command": "srl_interface_brief",
+      "arguments": { "interface": "ethernet-1/1" },
+      "output_ref": "SRL_INTERFACE_UP",
+      "expect_ok": true,
+      "expect_outcome": "pass",
+      "expect_reasons_empty": true
+    },
+    {
+      "name": "down interface is not reported ok",
+      "kind": "verify",
+      "command": "srl_interface_brief",
+      "arguments": { "interface": "ethernet-1/1" },
+      "output_ref": "SRL_INTERFACE_DOWN",
+      "expect_ok": false,
+      "expect_outcome": "fail"
+    },
+    {
+      "name": "absent interface does not pass by default",
+      "kind": "verify",
+      "command": "srl_interface_brief",
+      "arguments": { "interface": "ethernet-9/9" },
+      "output_ref": "SRL_INTERFACE_UP",
+      "expect_ok": false
+    },
+    {
+      "name": "full OSPF adjacency is ok",
+      "kind": "verify",
+      "command": "srl_ospf_neighbor",
+      "arguments": { "neighbor_router_id": "10.1.12.2" },
+      "output_ref": "SRL_OSPF_FULL",
+      "expect_ok": true,
+      "expect_reasons_empty": true
+    },
+    {
+      "name": "exstart adjacency is not ok",
+      "kind": "verify",
+      "command": "srl_ospf_neighbor",
+      "arguments": { "neighbor_router_id": "10.1.12.2" },
+      "output_ref": "SRL_OSPF_NOT_FULL",
+      "expect_ok": false
+    },
+    {
+      "name": "full state with a bad neighbour is not ok",
+      "kind": "verify",
+      "command": "srl_ospf_neighbor",
+      "arguments": { "neighbor_router_id": "10.1.12.2" },
+      "output_ref": "SRL_OSPF_FULL_BUT_BAD_NEIGHBOR",
+      "expect_ok": false
+    },
+    {
+      "name": "established BGP peer is ok",
+      "kind": "verify",
+      "command": "srl_bgp_neighbor_detail",
+      "arguments": { "peer_ip": "10.1.13.2", "remote_as": "65002" },
+      "output_ref": "SRL_BGP_ESTABLISHED",
+      "expect_ok": true
+    },
+    {
+      "name": "active BGP peer is not ok",
+      "kind": "verify",
+      "command": "srl_bgp_neighbor_detail",
+      "arguments": { "peer_ip": "10.1.13.2", "remote_as": "65002" },
+      "output_ref": "SRL_BGP_ACTIVE",
+      "expect_ok": false
+    },
+    {
+      "name": "peer established against the wrong AS is not ok",
+      "kind": "verify",
+      "command": "srl_bgp_neighbor_detail",
+      "arguments": { "peer_ip": "10.1.13.2", "remote_as": "65099" },
+      "output_ref": "SRL_BGP_ESTABLISHED",
+      "expect_ok": false
+    },
+    {
+      "name": "installed route is ok",
+      "kind": "verify",
+      "command": "srl_route_detail",
+      "arguments": { "prefix": "10.0.0.2/32" },
+      "output_ref": "SRL_ROUTE_INSTALLED",
+      "expect_ok": true
+    },
+    {
+      "name": "missing route is not ok even though the prefix is echoed",
+      "kind": "verify",
+      "command": "srl_route_detail",
+      "arguments": { "prefix": "10.0.0.2/32" },
+      "output_ref": "SRL_ROUTE_MISSING",
+      "expect_ok": false
+    },
+    {
+      "name": "a credential in device output never reaches the verdict",
+      "kind": "verify",
+      "command": "srl_route_detail",
+      "arguments": { "prefix": "9.9.9.9/32" },
+      "output_ref": "SRL_ROUTE_INSTALLED_WITH_SECRET",
+      "expect_ok": false,
+      "expect_absent": ["hunter2"]
+    }
+  ]
+}

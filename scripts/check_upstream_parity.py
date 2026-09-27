@@ -34,7 +34,12 @@ COMMIT = "71d3398207088ca67a15ddd3132cedfed81bd678"
 UPSTREAM_PATH = "pyats/parsers.py"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{COMMIT}/{UPSTREAM_PATH}"
 
-VENDORED = pathlib.Path(__file__).resolve().parents[1] / "server" / "vendor" / "pyats_parsers.py"
+VENDORED = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "netverify"
+    / "parsers"
+    / "upstream.py"
+)
 
 #: Marker that ends the provenance header. Everything after it must match
 #: upstream byte for byte.

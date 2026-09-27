@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Realms4239/netverify",
+  "description": "Verify ISP backbone device output (SR Linux, FRR) with no device credentials. Read-only MCP tools for network state, plus secret redaction and prompt-injection detection for untrusted device text.",
+  "repository": {
+    "url": "https://github.com/Realms4239/netverify",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "websiteUrl": "https://github.com/Realms4239/netverify#readme",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "netverify",
+      "version": "1.0.0",
+      "transport": { "type": "stdio" }
+    }
+  ]
+}

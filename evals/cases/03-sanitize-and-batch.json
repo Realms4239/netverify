@@ -1,0 +1,115 @@
+{
+  "_comment": [
+    "Sanitisation and batch cases. These cover the module that decides what text",
+    "is safe to hand to a model, plus the batch path an operator uses during an",
+    "incident. 'expect_absent' is the field that earns these cases: a case that",
+    "passes while leaking a secret is a failure, and no positive assertion would",
+    "catch that."
+  ],
+  "cases": [
+    {
+      "name": "sanitize masks a credential but keeps the key name",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_WITH_SECRET",
+      "expect_kinds": ["credential"],
+      "expect_clean": false,
+      "expect_absent": ["hunter2"],
+      "expect_contains": ["password="]
+    },
+    {
+      "name": "sanitize neutralises a verdict coercion",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_WITH_INJECTION",
+      "expect_kinds": ["verdict_coercion"],
+      "expect_contains": ["untrusted-content"]
+    },
+    {
+      "name": "sanitize neutralises an instruction override",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_INSTRUCTION_OVERRIDE",
+      "expect_kinds": ["instruction_override"],
+      "expect_contains": ["untrusted-content"]
+    },
+    {
+      "name": "sanitize neutralises an exfiltration directive",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_EXFILTRATION",
+      "expect_kinds": ["exfiltration"],
+      "expect_contains": ["untrusted-content"]
+    },
+    {
+      "name": "sanitize removes zero-width and bidi characters",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_ZERO_WIDTH",
+      "expect_kinds": ["hidden_characters"],
+      "expect_absent": ["‮"]
+    },
+    {
+      "name": "sanitize catches a fullwidth credential",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_FULLWIDTH_SECRET",
+      "expect_kinds": ["credential"],
+      "expect_absent": ["hunter2"]
+    },
+    {
+      "name": "sanitize leaves clean device output untouched",
+      "kind": "sanitize",
+      "output_ref": "SRL_INTERFACE_UP",
+      "expect_clean": true,
+      "expect_kinds": []
+    },
+    {
+      "name": "sanitize truncates an oversize payload",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_OVERSIZE",
+      "expect_truncated": true
+    },
+    {
+      "name": "scan reports a secret without altering the text",
+      "kind": "scan",
+      "output_ref": "OUTPUT_WITH_SECRET",
+      "expect_kinds": ["credential"],
+      "expect_count": 1,
+      "expect_highest_severity": "high"
+    },
+    {
+      "name": "scan reports a critical injection",
+      "kind": "scan",
+      "output_ref": "OUTPUT_INSTRUCTION_OVERRIDE",
+      "expect_kinds": ["instruction_override"],
+      "expect_highest_severity": "critical"
+    },
+    {
+      "name": "scan finds nothing in clean output",
+      "kind": "scan",
+      "output_ref": "PING_OK",
+      "expect_count": 0
+    },
+    {
+      "name": "a batch keeps results in place when one entry is refused",
+      "kind": "batch",
+      "items": [
+        { "command": "ping", "output_ref": "PING_OK" },
+        { "command": "configure", "output_ref": "PING_OK" },
+        { "command": "ping", "output_ref": "PING_TOTAL_LOSS" }
+      ],
+      "expect_verdicts": 1,
+      "expect_refused": 1
+    },
+    {
+      "name": "a batch reports every entry independently",
+      "kind": "batch",
+      "items": [
+        { "command": "ping", "output_ref": "PING_OK" },
+        { "command": "frr_bgp_summary", "output_ref": "FRR_SUMMARY_HEALTHY" },
+        {
+          "command": "srl_interface_brief",
+          "output_ref": "SRL_INTERFACE_UP",
+          "arguments": { "interface": "ethernet-1/1" }
+        }
+      ],
+      "expect_verdicts": 3,
+      "expect_refused": 0
+    }
+  ]
+}

@@ -1,45 +1,82 @@
 [project]
-name = "hardened-mcp-evals"
-version = "0.1.0"
-description = "Project F1: a read-only MCP tool that verifies ISP backbone device output, with an offline eval gate"
+name = "netverify"
+version = "1.0.0"
+description = "Verify ISP backbone device output safely, with no credentials. Zero-dependency library plus a read-only MCP server."
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["mcp==1.28.1"]
+license = { text = "MIT" }
+keywords = ["mcp", "network", "srl", "frr", "ospf", "bgp", "prompt-injection", "verification"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: System Administrators",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Networking",
+  "Topic :: Security",
+]
+
+# The library itself needs NOTHING. That is a deliberate product decision, not
+# an accident: `netverify` is meant to be vendored into a lab box, an air-gapped
+# CI runner, or a 12GB machine on a bad power grid, and a dependency tree is a
+# supply-chain surface in exactly that setting. The MCP server is the only part
+# that needs anything, and it is an optional extra.
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp==2.2.0"]
+dev = ["bandit==1.9.4", "ruff==0.16.9", "pytest==9.1.1"]
+
+[project.scripts]
+netverify = "server.app:main"
+
+[project.urls]
+Homepage = "https://github.com/Realms4239/netverify"
+Source = "https://github.com/Realms4239/netverify"
+Issues = "https://github.com/Realms4239/netverify/issues"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# `netverify` is the shipped library; `server` is the MCP adapter. Both are
+# packaged, because `pip install netverify[mcp]` should give a working server
+# and not require a git checkout.
+packages = ["netverify", "netverify.parsers", "server"]
 
 [tool.ruff]
-# 100 rather than ruff's default 88: the fixtures and docstrings carry real
-# vendor table output, and wrapping those for style would obscure them.
 line-length = 100
 target-version = "py311"
-extend-exclude = ["server/vendor"]
+extend-exclude = ["netverify/parsers"]
 
 [tool.ruff.lint]
-# E/W/F: pycodestyle errors and warnings, pyflakes.
-# I: import sorting.
-# B: bugbear - catches the mutable-default and bare-except classes of bug.
-# UP: pyupgrade - keeps the syntax modern for the declared 3.11 floor.
-# S: bandit-equivalent rules, so `ruff` alone already flags the security
-#   issues bandit would. Both run in CI on purpose: ruff is fast and broad,
-#   bandit is the named tool an interviewer recognises.
+# E/W/F: pycodestyle and pyflakes. I: import sorting. B: bugbear.
+# UP: pyupgrade. S: bandit-equivalent rules, so ruff alone already flags the
+# security issues bandit would. Both run in CI on purpose: ruff is fast and
+# broad, bandit is the tool an interviewer recognises.
 select = ["E", "W", "F", "I", "B", "UP", "S"]
 ignore = [
-    # Tests deliberately call private helpers and reach into module internals
-    # to assert on the contract; that is the point of a contract test.
-    "S101",  # assert used - expected in tests
-    "S603",  # subprocess - not used, but bandit-equivalent flags call sites
-    "S607",  # partial executable path
+  "S101",  # assert - expected in tests
+  "S603",  # subprocess - the scripts spawn python, deliberately
+  "S607",  # partial executable path
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # The vendored parser is not ours to restyle, exactly like ansible/collections
 # in the sibling flagship repo. It is verified byte-for-byte by
-# scripts/check_upstream_parity.py instead, which is a stronger check than lint.
-"server/vendor/*" = ["ALL"]
-"tests/*" = ["S101", "B011"]
+# scripts/check_upstream_parity.py, which is a stronger check than lint.
+"netverify/parsers/*" = ["ALL"]
+"tests/*" = ["S101", "B011", "S404", "S603"]
+# The sanitizer fixtures deliberately contain credential-shaped and
+# injection-shaped strings, because testing the sanitizer requires payloads for
+# it to catch. S105/S106 flag those as hardcoded secrets. The suppression is
+# scoped to this one file; a real secret elsewhere still fails the build.
+"tests/fixtures.py" = ["S105", "S106", "S107"]
+# models.py has an enum member literally named PASS. S105 reads the identifier as
+# "hardcoded password", which it is not. The name is fixed by the Outcome enum's
+# meaning and cannot be changed to satisfy a linter.
+"netverify/models.py" = ["S105"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["server", "tests", "scripts", "evals"]
+known-first-party = ["netverify", "server", "tests", "scripts", "evals"]
 
-[tool.bandit]
-# exclude is handled via skips in CI rather than here, so the config stays
-# visible and reviewable in one place.
-exclude_dirs = ["server/vendor", "tests"]
