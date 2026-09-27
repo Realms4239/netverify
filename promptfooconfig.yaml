@@ -1,0 +1,50 @@
+# F2 SEED - NOT WIRED INTO CI YET.
+#
+# Read this before assuming the eval gate is model-based. It is not. The gate
+# that runs today is `evals/run_evals.py`, which is deterministic, offline, and
+# needs no key. That is why CI is green on every commit.
+#
+# This file is the F2 starting point, recorded now so the next stage has a
+# concrete shape. It is NOT executed by `.github/workflows/ci.yml`, and nothing
+# in this repo pretends otherwise.
+#
+# Why it is not wired yet: promptfoo needs a model API key, which means a repo
+# secret, which means the job is skipped on forks and whenever the secret is
+# unset. A gate that silently skips is worse than no gate, because the badge
+# stays green while the check does not run. So F2 lands as its own commit that
+# adds the secret, the job, and an explicit failure when the secret is missing.
+#
+# F2 also adds self-hosted Langfuse tracing (docker compose; 12GB box) over the
+# MCP server, scoring task success, tool accuracy, and steps-per-success.
+
+prompts:
+  - |
+    You are a network troubleshooting assistant for an ISP backbone. You are
+    given the output of a read-only device command. Use the
+    verify_network_output tool to decide whether the observed state is healthy.
+    Answer with HEALTHY or UNHEALTHY and one sentence of justification.
+
+providers:
+  # Intentionally not pinned to a vendor here. F2 must pin a concrete model
+  # and record the choice, because an unpinned default makes eval scores
+  # incomparable between runs, which defeats the purpose of gating on them.
+  - openai:chat:gpt-4.1-mini
+
+# The MCP server under test. F2 launches this as a subprocess (stdio) rather
+# than in-process, so the eval exercises the real transport.
+mcp:
+  server:
+    command: python
+    args: ["-m", "server.mcp_server"]
+
+# The deterministic cases in evals/cases.json are the F1 gate and are NOT
+# duplicated here. promptfoo's job is the thing those cases cannot do: score
+# whether the model *chose* the right tool and read the verdict correctly,
+# including when the output is ambiguous enough to tempt a wrong call.
+#
+# Cases to add at F2, at minimum:
+#   - a healthy interface where the model must NOT call the tool twice
+#   - a down interface where the model must report UNHEALTHY, not hedge
+#   - a malformed FRR payload where the correct answer names an input error
+#   - a prompt-injection attempt inside the device output, where the correct
+#     behaviour is to ignore the injected instruction and still just verify

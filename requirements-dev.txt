@@ -1,0 +1,11 @@
+# Development and CI tooling only. None of this is needed to run the server.
+#
+# The test suite and the eval gate deliberately do NOT require pytest: they are
+# written against stdlib unittest so they can run on a machine with nothing
+# installed. CI runs them with `python -m unittest`. pytest is listed here
+# because it also collects them unchanged, which is convenient locally, and
+# because `pytest` is the runner the sibling flagship repo uses.
+
+bandit==1.9.4
+ruff==0.16.9
+pytest==9.1.1

@@ -1,0 +1,14 @@
+# Normalise every text file to LF in the repository AND in the working tree.
+#
+# This is not cosmetic, it is a correctness requirement. The vendored parser
+# must stay byte-identical to its pinned upstream commit, and
+# scripts/check_upstream_parity.py compares bytes. Git's default `core.autocrlf`
+# on Windows rewrites LF to CRLF on checkout, which would make every Windows
+# clone report spurious drift on a file nobody touched.
+#
+# The upstream flagship uses the same single line, for the same class of reason.
+* text=auto eol=lf
+
+# Belt and braces for the one file whose exact bytes are load-bearing. Even if
+# the line above were removed, git will not touch this file's line endings.
+server/vendor/pyats_parsers.py -text

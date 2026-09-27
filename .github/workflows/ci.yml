@@ -1,0 +1,123 @@
+---
+
+name: Hardened MCP CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: f1-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The offline quality job. Everything here runs with no network, no model, and
+  # no secrets, so it is green on every commit rather than being skipped when a
+  # credential is absent. That distinction is the whole point: a gate that
+  # cannot run is indistinguishable from no gate.
+  quality:
+    name: Contract, Tests, Evals, Smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install runtime dependency
+        run: python -m pip install --requirement requirements.txt
+
+      - name: Lint
+        run: |
+          python -m pip install ruff==0.16.9
+          ruff check .
+          ruff format --check .
+
+      - name: Verify the vendored parser has not drifted
+        # Offline mode here on purpose: the live comparison against GitHub is a
+        # separate job below. If the network check passed, the offline header
+        # check is redundant; running it in both places means a network outage
+        # cannot quietly turn the contract check into a no-op.
+        run: python scripts/check_upstream_parity.py --offline
+
+      - name: Run the test suite
+        # stdlib unittest on purpose: no pytest install, no plugin discovery, and
+        # the suite runs identically on a laptop with nothing installed.
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Run the eval gate
+        run: python evals/run_evals.py
+
+      - name: End-to-end MCP smoke test
+        # Speaks real MCP over an in-memory transport. Unit tests call the tool
+        # as a function and cannot catch a server that fails to start or a
+        # schema a client cannot use.
+        run: python scripts/smoke_test.py
+
+  # Network-dependent drift check, kept separate so a GitHub outage fails one
+  # job loudly instead of blocking the whole pipeline.
+  parity:
+    name: Vendored Parity (live)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compare against the pinned upstream commit
+        run: python scripts/check_upstream_parity.py
+
+  security:
+    name: Security Gates
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install scanners
+        run: python -m pip install bandit==1.9.4
+
+      - name: Bandit
+        # server/vendor is skipped on purpose: it is third-party code verified
+        # byte-for-byte by the parity job, and reporting its issues as ours
+        # would be noise. The tests are skipped because assert-heavy test code
+        # is not a production attack surface.
+        run: bandit -r server scripts evals -ll -x server/vendor
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+  # F2 lives here and is intentionally not wired yet.
+  #
+  # The promptfoo trajectory eval needs a model API key, which means a secret,
+  # which means a job that gets skipped on a fork or when the secret is unset -
+  # the exact condition under which a green badge means nothing. So the
+  # deterministic gate in evals/ is what gates today, and this placeholder
+  # records what F2 adds rather than pretending it already runs.
+  #
+  # F2 also needs a PR secret named EVAL_MODEL_API_KEY, and a publish step for
+  # the Langfuse self-hosted traces (Project F, stage 2).

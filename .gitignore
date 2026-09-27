@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Test and tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local run logs produced by the verification commands in the README
+*.log
+!docs/**/*.log
+
+# Eval and smoke-test output
+promptfoo-output/
+promptfoo-results/
+
+# Local MCP client config that may carry credentials
+.mcp.json
+.claude/
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
