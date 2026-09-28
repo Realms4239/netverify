@@ -27,12 +27,25 @@ from server.app import build_server  # noqa: E402
 from tests import fixtures as fx  # noqa: E402
 
 EXPECTED_TOOLS = {
+    # Single-command verification, and the two that harden its input.
     "verify_network_output",
     "sanitize_device_output",
     "audit_device_output",
+    # Batch and aggregate reasoning: the operator workflows.
     "verify_capture",
+    "synthesize_health",
+    "compare_captures",
+    # Self-description, so a caller can check its claims.
+    "self_check",
 }
-EXPECTED_RESOURCES = {"netverify://contract", "netverify://security"}
+#: `resources/list` returns concrete resources only. Templates are a separate
+#: list, so asserting the command template here would be asserting the SDK.
+EXPECTED_RESOURCES = {
+    "netverify://contract",
+    "netverify://security",
+    "netverify://errors",
+}
+EXPECTED_TEMPLATES = {"netverify://commands/{command_id}"}
 
 
 async def main() -> int:
@@ -52,6 +65,16 @@ async def main() -> int:
     resources = {str(r.uri) for r in await server.list_resources()}
     if resources != EXPECTED_RESOURCES:
         failures.append(f"expected {sorted(EXPECTED_RESOURCES)}, got {sorted(resources)}")
+
+    # The command template is what lets an agent read one command's contract on
+    # demand, so its absence is a real loss of discoverability, not a detail.
+    templates = await server.list_resource_templates()
+    template_uris = {t.uri_template for t in templates}
+    if template_uris != EXPECTED_TEMPLATES:
+        failures.append(
+            f"expected templates {sorted(EXPECTED_TEMPLATES)}, "
+            f"got {sorted(template_uris)}"
+        )
 
     ok_result = await server.call_tool(
         "verify_network_output",

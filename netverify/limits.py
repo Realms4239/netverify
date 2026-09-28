@@ -88,3 +88,75 @@ class TokenBucket:
         """Current balance. Exposed for the health resource and for tests."""
         self._refill()
         return self._tokens
+
+
+# --- call deadline ---------------------------------------------------------
+
+#: Default budget for a single tool call, in seconds. Comfortably above the
+#: measured worst case (a full 64 KiB sanitise is ~2 ms) and far below anything a
+#: user or a host would notice as a stall.
+DEFAULT_DEADLINE_SECONDS = 5.0
+
+
+class DeadlineExceeded(TimeoutError):
+    """Raised when a call exceeded its cooperative budget.
+
+    A `TimeoutError` subclass so a host that already treats timeouts specially
+    handles it without knowing about this module.
+    """
+
+
+class Deadline:
+    """A monotonic budget for one call.
+
+    The MCP specification lists timeouts as a SHOULD. For a server that talks to
+    a network the timeout protects a socket from hanging. netverify talks to
+    nothing, so this protects against something narrower and more specific: a
+    pathological input shape that makes the regexes work far longer than the
+    size cap suggests.
+
+    The size limit bounds the *input*; this bounds the *call*. Those are
+    different guarantees, and this is the one a host cares about, because it is
+    the one that decides whether a single tool call can stall a session.
+
+    Deliberately **cooperative**: it measures elapsed time and the caller checks
+    it between stages. It does not preempt. Preempting pure Python would mean
+    either signals, which do not compose with a threaded MCP server, or
+    subprocesses, which would mean passing caller-supplied text to a child
+    process. Being explicit about what it does not do is more useful than
+    implying a guarantee it cannot keep.
+    """
+
+    def __init__(self, seconds: float = DEFAULT_DEADLINE_SECONDS) -> None:
+        if seconds <= 0:
+            raise ValueError("deadline must be positive")
+        self.seconds = seconds
+        self.started = time.monotonic()
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self.seconds - self.elapsed)
+
+    @property
+    def exceeded(self) -> bool:
+        return self.remaining <= 0.0
+
+    def check(self, stage: str) -> None:
+        """Raise if the budget is gone. Named for the error message.
+
+        The stage name earns its place: when a deadline does fire, the only
+        useful question is which part of the work was slow, and "verify" alone
+        does not answer it.
+        """
+        if self.exceeded:
+            raise DeadlineExceeded(
+                f"{stage} exceeded its {self.seconds:g}s budget "
+                f"({self.elapsed:.2f}s elapsed). This usually means an input shape "
+                "the size cap did not anticipate; please report it."
+            )
+
+        return self._tokens

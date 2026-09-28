@@ -53,7 +53,7 @@ pip install netverify          # library only, zero dependencies
 pip install "netverify[mcp]"   # plus the MCP server
 ```
 
-## The four tools
+## The seven tools
 
 | Tool | Job |
 |---|---|
@@ -61,15 +61,62 @@ pip install "netverify[mcp]"   # plus the MCP server
 | `sanitize_device_output` | Mask secrets, neutralise prompt injection |
 | `audit_device_output` | Report risk without touching the text (CI, triage) |
 | `verify_capture` | Verify a whole incident capture; one bad entry does not abort |
+| `synthesize_health` | Many verdicts → one health answer, worst offender named |
+| `compare_captures` | What changed between two captures, for change review |
+| `self_check` | Report what this server is, and demonstrate its guards hold |
 
-Plus two resources a client can read at runtime: `netverify://contract`
-(commands, limits, guarantees) and `netverify://security` (threat model).
+The first four answer about one thing. The last three exist because a single
+verdict is a narrow question — "is this interface up?" — while the questions an
+operator actually asks are aggregate and comparative. `synthesize_health`
+separates `unhealthy` from `indeterminate`, because an unreadable capture is not
+evidence of a healthy network. `compare_captures` keys on the command *and* its
+arguments, so a capture that stops covering an interface is reported as removed
+rather than silently "unchanged".
+
+`self_check` is the one worth knowing about: it reports the registered commands,
+the detection patterns, the limits, the pinned upstream commit and a hash of the
+vendored parser — and then *demonstrates* its guards by re-checking that a
+mutating command and a raw CLI string are both still refused. A server
+describing itself is an assertion; this one produces evidence. It also says
+plainly that it has not verified upstream parity, because it cannot without the
+network, and a self-report that overstates what it checked is worse than none.
+
+Resources a client can read at runtime: `netverify://contract` (commands, limits,
+guarantees), `netverify://security` (threat model), `netverify://errors` (every
+refusal and how to fix it), and `netverify://commands/{id}` (one command's
+contract on demand).
 
 Register it:
 
 ```json
 { "mcpServers": { "netverify": { "command": "netverify" } } }
 ```
+
+## The CLI, for anyone who has never heard of MCP
+
+The MCP server is the interesting surface, but not the only audience. An engineer
+with a `show` output in a text file does not need a protocol:
+
+```sh
+netverify commands                        # what can be checked
+cat out.txt | netverify verify --command ping --scan
+netverify verify --command srl_interface_brief --interface ethernet-1/1 -f out.txt
+netverify health --compare before.json after.json
+netverify self-check                      # are this installation's guards intact?
+```
+
+Exit codes are the point, so this is usable from a shell script:
+
+| Code | Meaning |
+|---|---|
+| 0 | every check passed |
+| 1 | a check failed — the network has a fault |
+| 2 | the request was refused, or input unreadable |
+| 3 | the output could not be parsed, so the state is unknown |
+
+`set -e` must not treat "this link is down" and "I typed the command wrong" as
+the same event, nor treat a bad paste as a fault.
+
 
 ## Guarantees, and how each is enforced
 
@@ -151,6 +198,18 @@ Built on **MCP revision 2026-07-28** via `mcp` 2.x:
   validates the shape instead of parsing prose.
 - **Rate limiting and audit logging**, both of which the specification requires
   and most servers omit.
+- **OpenTelemetry**, opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT` or
+  `NETVERIFY_OTEL_CONSOLE=1`. The SDK already emits a SERVER span per message;
+  what this adds is the library's own spans and attributes — which command, which
+  platform, whether the verdict passed, how many findings. That is what F2's
+  Langfuse tracing needs, and it costs a config file rather than an integration.
+  With no exporter configured the SDK's spans stay a no-op, deliberately: a
+  server silently buffering spans nobody exports is worse than one that emits
+  none.
+- **A frozen tool contract.** `tests/test_contract.py` pins the tool names,
+  arguments, output schemas and resource URIs, so a rename becomes a visible diff
+  instead of a client that quietly stops working. Behaviour tests cannot catch
+  that — a renamed tool with identical behaviour passes every one of them.
 
 The tool signature is deliberately explicit rather than `**kwargs`, because the
 SDK derives the input schema from it and a catch-all becomes a required
@@ -219,7 +278,7 @@ rather than letting them harden into false confidence:
 ## Development
 
 ```sh
-python -m unittest discover -s tests -t .   # 96 tests, stdlib only
+python -m unittest discover -s tests -t .   # 122 tests, stdlib only
 python evals/run_evals.py                   # 38 eval cases
 python scripts/smoke_test.py                # MCP round trip, in-memory
 python scripts/stdio_check.py               # real process, real pipe

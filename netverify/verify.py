@@ -21,6 +21,12 @@ from .errors import ScopeError
 from .models import Outcome, Verdict
 from .sanitize import sanitize
 from .scope import validate
+from .telemetry import (
+    ATTR_COMMAND_ID,
+    ATTR_INPUT_BYTES,
+    ATTR_PLATFORM,
+    span,
+)
 
 
 def verify(
@@ -50,33 +56,47 @@ def verify(
     spec = request["spec"]
     started = time.perf_counter()
 
-    check = spec.check(request["output"], **request["arguments"])
+    # The verdict attributes are attached to the SDK's own SERVER span rather
+    # than to a nested one. A failing check is a *result*, not an exception, and
+    # recording it where the tool call is recorded means a trace answers "did
+    # this link pass?" without anyone having to correlate two spans.
+    with span(
+        "netverify.verify",
+        **{
+            ATTR_COMMAND_ID: spec.id,
+            ATTR_PLATFORM: spec.platform,
+            ATTR_INPUT_BYTES: len(request["output"]),
+        },
+    ):
+        check = spec.check(request["output"], **request["arguments"])
 
-    if sanitize_output:
-        observed = sanitize(f"checked {spec.command}").safe_text[:200]
-        reasons = tuple(sanitize(reason, max_bytes=800).safe_text[:200] for reason in check.reasons)
-    else:
-        observed = f"checked {spec.command}"
-        reasons = check.reasons
+        if sanitize_output:
+            observed = sanitize(f"checked {spec.command}").safe_text[:200]
+            reasons = tuple(
+                sanitize(reason, max_bytes=800).safe_text[:200] for reason in check.reasons
+            )
+        else:
+            observed = f"checked {spec.command}"
+            reasons = check.reasons
 
-    # A checker that reports failure is a network verdict. A checker that could
-    # not parse the input labels its own reasons, which is how INPUT_ERROR is
-    # distinguished without a second return channel.
-    outcome = Outcome.PASS if check.ok else Outcome.FAIL
-    if not check.ok and any("input error" in reason for reason in check.reasons):
-        outcome = Outcome.INPUT_ERROR
+        # A checker that reports failure is a network verdict. A checker that
+        # could not parse the input labels its own reasons, which is how
+        # INPUT_ERROR is distinguished without a second return channel.
+        outcome = Outcome.PASS if check.ok else Outcome.FAIL
+        if not check.ok and any("input error" in reason for reason in check.reasons):
+            outcome = Outcome.INPUT_ERROR
 
-    verdict = Verdict(
-        ok=check.ok,
-        outcome=outcome,
-        command_id=spec.id,
-        command=spec.command,
-        platform=spec.platform,
-        check=check.name,
-        observed=observed,
-        reasons=reasons,
-        arguments=request["arguments"],
-    )
+        verdict = Verdict(
+            ok=check.ok,
+            outcome=outcome,
+            command_id=spec.id,
+            command=spec.command,
+            platform=spec.platform,
+            check=check.name,
+            observed=observed,
+            reasons=reasons,
+            arguments=request["arguments"],
+        )
 
     if audit is not None:
         audit.record(

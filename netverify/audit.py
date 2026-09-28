@@ -116,18 +116,20 @@ class AuditLog:
             self._sink.flush()
         except Exception as exc:  # noqa: BLE001
             # A logging failure must not take down the tool call it describes,
-            # so this is swallowed - but not silently. The traceback goes to the
-            # real stderr, which is where diagnostics belong, distinct from the
-            # audit stream itself. Silently dropping audit records is how a
-            # control becomes invisible.
-            import sys as _sys
+            # so it is caught - but not swallowed. Silently dropping an audit
+            # record is how a control becomes invisible, so the failure is
+            # reported on stderr, which is where diagnostics belong and is
+            # distinct from the audit stream itself.
+            #
+            # `sys.stderr`, not `sys.__stderr__`. An earlier version reached for
+            # the original stream to "be sure" the report was visible, which
+            # quietly defeated `contextlib.redirect_stderr` and any host that
+            # redirects stderr to a log file. Respecting the current stream is
+            # both more correct and the only version a test can assert on.
             import traceback
 
-            print(
-                f"netverify: audit sink failed: {exc}",
-                file=_sys.__stderr__,
-            )
-            traceback.print_exc(file=_sys.__stderr__)
+            print(f"netverify: audit sink failed: {exc}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
 
 #: Process-wide default. The MCP layer reuses this so that every tool call is

@@ -29,10 +29,11 @@ which is why nothing here holds per-session data.
 from __future__ import annotations
 
 import json
+import sys
 import time
-from typing import Any
+from typing import Annotated, Any
 
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp_types import ToolAnnotations
 
 from netverify import (
@@ -40,9 +41,13 @@ from netverify import (
     MAX_BATCH_ITEMS,
     MAX_BYTES,
     TokenBucket,
+    compare_states,
     describe_all,
+    registry,
     sanitize,
     scan,
+    self_check,
+    synthesize_health,
     verify,
     verify_many,
 )
@@ -93,6 +98,16 @@ READ_ONLY = ToolAnnotations(
 )
 
 
+def _command_id_list() -> str:
+    """The registered command ids, one line, for the tool description.
+
+    Derived from the registry so the description cannot drift. A hand-written
+    list would go stale the moment a check is added, and the failure would be
+    silent: an agent would simply never try a command that worked.
+    """
+    return "\n".join(f"  {spec.id} - {spec.summary}" for spec in COMMANDS)
+
+
 def _charge(cost: float = 1.0) -> None:
     """Consume request budget, or refuse.
 
@@ -111,13 +126,21 @@ def _charge(cost: float = 1.0) -> None:
 
 
 def verify_network_output(
-    command: str,
-    output: str,
-    interface: str | None = None,
-    neighbor_router_id: str | None = None,
-    peer_ip: str | None = None,
-    remote_as: str | None = None,
-    prefix: str | None = None,
+    command: Annotated[
+        str,
+        "Registered command id, not CLI text. Read netverify://commands/{id} for "
+        "the full list, or call the self_check tool.",
+    ],
+    output: Annotated[
+        str,
+        "The raw text that command printed on the device, verbatim. Treated as "
+        "untrusted: it is sanitised before being reported.",
+    ],
+    interface: Annotated[str | None, "Interface name, for srl_interface_brief"] = None,
+    neighbor_router_id: Annotated[str | None, "OSPF router ID, for srl_ospf_neighbor"] = None,
+    peer_ip: Annotated[str | None, "BGP peer address, for srl_bgp_neighbor_detail"] = None,
+    remote_as: Annotated[str | None, "Expected remote AS, for srl_bgp_neighbor_detail"] = None,
+    prefix: Annotated[str | None, "IPv4 CIDR, for srl_route_detail"] = None,
 ) -> dict[str, Any]:
     """Verify one read-only device command's output. Returns a verdict.
 
@@ -229,6 +252,23 @@ def audit_device_output(output: str) -> dict[str, Any]:
     }
 
 
+def _check_batch(commands: Any, label: str = "commands") -> None:
+    """Validate a batch's shape before any work or charge happens.
+
+    Extracted because four tools now accept a list, and this check is the
+    security-relevant part: it is what stops one call from pinning the process.
+    Naming the offending side matters in `compare_captures`, where the bad list
+    could be `before` or `after` and "commands is too long" would not say which.
+    """
+    if not isinstance(commands, list):
+        raise ToolError(f"{label} must be a list of captures, got {type(commands).__name__}")
+    if len(commands) > MAX_BATCH_ITEMS:
+        raise ToolError(
+            f"{label} has {len(commands)} entries, above the {MAX_BATCH_ITEMS} "
+            "limit. Split it into several calls."
+        )
+
+
 def verify_capture(commands: list[dict[str, Any]]) -> dict[str, Any]:
     """Verify many captured command outputs at once.
 
@@ -247,13 +287,7 @@ def verify_capture(commands: list[dict[str, Any]]) -> dict[str, Any]:
     """
     # Validate the batch shape *before* charging, so an oversize request is
     # refused for the right reason rather than as a rate-limit failure.
-    if not isinstance(commands, list):
-        raise ToolError(f"commands must be a list of captures, got {type(commands).__name__}")
-    if len(commands) > MAX_BATCH_ITEMS:
-        raise ToolError(
-            f"batch has {len(commands)} entries, above the {MAX_BATCH_ITEMS} limit. "
-            "Split it into several calls."
-        )
+    _check_batch(commands)
 
     # Charged per item, not once per call. An earlier version charged a flat
     # 1.0 while its own comment claimed proportionality, which meant a single
@@ -291,6 +325,90 @@ def verify_capture(commands: list[dict[str, Any]]) -> dict[str, Any]:
         "failed_count": failed_count,
         "refused_count": refused_count,
     }
+
+
+def self_check_server() -> dict[str, Any]:
+    """Report what this server is, and prove its guards still hold.
+
+    Call this before trusting a verdict from an unfamiliar host. It returns the
+    registered commands, the detection patterns, the limits in force, the pinned
+    upstream commit the vendored parser came from, and a live re-check that a
+    mutating command and a raw CLI string are both still refused.
+
+    That last part is the point. A server describing itself is an assertion;
+    this one also demonstrates it, so the answer is evidence rather than a
+    claim.
+
+    Args:
+        none.
+
+    Returns:
+        Server identity, guarantees, command and pattern inventory, limits, the
+        vendored-parser digest and pin, the verified guards, and the tracing
+        state. Read-only, offline, and safe to call at any time.
+    """
+    _charge()
+    report = self_check()
+    AUDIT.record("self_check", detail=f"commands={report['commands']['count']}")
+    return report
+
+
+def synthesize_health_report(commands: list[dict[str, Any]]) -> dict[str, Any]:
+    """Roll many captured outputs into one health verdict, naming the worst.
+
+    For an incident or a pre-change sweep, where the question is "is the backbone
+    healthy" rather than about one command. Reports `unhealthy` when a network
+    check failed, and `indeterminate` when nothing failed but some output could
+    not be parsed - which is deliberately not the same answer, because an
+    unreadable capture is not evidence of a healthy network.
+
+    Args:
+        commands: List of {command, output, ...arguments} objects, at most
+            `MAX_BATCH_ITEMS` of them.
+
+    Returns:
+        {status, checked, passed, failed, input_errors, refused, worst, failures}
+    """
+    _check_batch(commands)
+    _charge(cost=float(max(1, len(commands))))
+    results = verify_many(commands, audit=AUDIT)
+    health = synthesize_health(results)
+    AUDIT.record("synthesize_health", ok=health["status"] == "healthy", detail=health["status"])
+    return health
+
+
+def compare_captures(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report what changed between two captures of the same backbone.
+
+    The change-review workflow: snapshot, apply a change, snapshot again, ask
+    what moved. Checks are identified by command *and* arguments, so a capture
+    that stops covering an interface is reported as removed rather than being
+    silently treated as unchanged.
+
+    Args:
+        before: Earlier capture, as a list of {command, output, ...arguments}.
+        after: Later capture, same shape.
+
+    Returns:
+        {regressions, recoveries, removed, unchanged, compared_before,
+        compared_after} where each regression carries the full verdict so a
+        reviewer sees what broke without a second call.
+    """
+    _check_batch(before, "before")
+    _check_batch(after, "after")
+    # Charged for both sides: a comparison is two verifications' worth of work,
+    # and charging once would make this the cheap way to exceed the budget.
+    _charge(cost=float(max(1, len(before) + len(after))))
+
+    before_results = verify_many(before, audit=AUDIT)
+    after_results = verify_many(after, audit=AUDIT)
+    diff = compare_states(before_results, after_results)
+    AUDIT.record(
+        "compare_captures",
+        ok=not diff["regressions"],
+        detail=f"regressions={len(diff['regressions'])}",
+    )
+    return diff
 
 
 def _contract_resource() -> str:
@@ -404,7 +522,15 @@ def build_server() -> Any:
             "Verify raw output from one read-only ISP backbone show command and "
             "return a structured verdict. Read-only and credential-free: it "
             "cannot change device state and does not fetch output. Distinguishes "
-            "a network fault from a malformed capture via the `outcome` field."
+            "a network fault from a malformed capture via the `outcome` field.\n\n"
+            # Generated from the registry rather than written out, because a
+            # hand-maintained list here would drift the moment a check is added,
+            # and the drift is invisible: the tool would simply be missing a
+            # command an agent could otherwise have used. The contract test
+            # asserts every registered id appears here.
+            f"command ids: {_command_id_list()}\n\n"
+            "Read netverify://commands/{id} for one command's full contract, or "
+            "netverify://errors before retrying a refused call."
         ),
         annotations=READ_ONLY,
         structured_output=True,
@@ -445,6 +571,145 @@ def build_server() -> Any:
         annotations=READ_ONLY,
         structured_output=True,
     )
+    server.add_tool(
+        synthesize_health_report,
+        name="synthesize_health",
+        title="Synthesize backbone health",
+        description=(
+            "Roll many captured outputs into one health verdict, naming the worst "
+            "offender. Reports 'unhealthy' when a network check failed and "
+            "'indeterminate' when output could not be parsed, because an "
+            "unreadable capture is not evidence of a healthy network."
+        ),
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    server.add_tool(
+        compare_captures,
+        name="compare_captures",
+        title="Compare two captures",
+        description=(
+            "Report what changed between two captures of the same backbone, for "
+            "change review. Checks are identified by command and arguments, so a "
+            "capture that stops covering an interface is reported as removed "
+            "rather than silently unchanged."
+        ),
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+    server.add_tool(
+        self_check_server,
+        name="self_check",
+        title="Verify this server",
+        description=(
+            "Report what this server is and demonstrate that its guards still "
+            "hold: registered commands, detection patterns, limits, the pinned "
+            "upstream commit, and a live re-check that mutating commands and raw "
+            "CLI strings are still refused. Read-only, offline. Call it before "
+            "trusting a verdict from an unfamiliar host."
+        ),
+        annotations=READ_ONLY,
+        structured_output=True,
+    )
+
+    @server.resource(
+        "netverify://errors",
+        name="Error taxonomy",
+        description=(
+            "Every way a call can be refused, and what to do about each. Read "
+            "this before retrying a failed call."
+        ),
+        mime_type="application/json",
+    )
+    def _errors() -> str:
+        return json.dumps(
+            {
+                "principle": (
+                    "A refused call is never a statement about the network. A "
+                    "network verdict is always `ok: false` with a reason; a "
+                    "refusal raises and says what to change. Do not report a "
+                    "refusal as a device fault."
+                ),
+                "categories": [
+                    {
+                        "when": "command is not in the allowlist",
+                        "cause": "Free-form CLI text, or a command that would write.",
+                        "fix": "Use one of the registered command ids.",
+                        "retryable": False,
+                    },
+                    {
+                        "when": "output exceeds the size cap",
+                        "cause": "More than 64 KiB of device text.",
+                        "fix": "Send only the relevant command's output.",
+                        "retryable": False,
+                    },
+                    {
+                        "when": "requires argument(s)",
+                        "cause": "A required argument was missing or empty.",
+                        "fix": "Supply the argument the refusal names.",
+                        "retryable": False,
+                    },
+                    {
+                        "when": "does not accept argument(s)",
+                        "cause": "An argument that is valid for another command.",
+                        "fix": "Use only the arguments the refusal lists.",
+                        "retryable": False,
+                    },
+                    {
+                        "when": "not a valid prefix / interface / peer_ip",
+                        "cause": "An argument failed its declared shape.",
+                        "fix": (
+                            "prefix must be IPv4 CIDR; peer_ip and "
+                            "neighbor_router_id a dotted-quad; interface a plain "
+                            "device name."
+                        ),
+                        "retryable": False,
+                    },
+                    {
+                        "when": "request budget exhausted",
+                        "cause": "Rate limit; the refusal states the wait.",
+                        "fix": "Wait the stated interval, then retry once.",
+                        "retryable": True,
+                    },
+                    {
+                        "when": "above the item limit (batch)",
+                        "cause": "A batch exceeded the item cap.",
+                        "fix": "Split into several calls.",
+                        "retryable": False,
+                    },
+                ],
+                "outcomes": {
+                    "pass": "The check held.",
+                    "fail": "The network failed a check. This is a real fault.",
+                    "input_error": (
+                        "The text could not be parsed. The device may be fine - "
+                        "re-capture before reporting a fault."
+                    ),
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    @server.resource(
+        "netverify://commands/{command_id}",
+        name="Command contract",
+        description=(
+            "One command's contract: the CLI it stands for, its arguments, and "
+            "what its verdict means."
+        ),
+        mime_type="application/json",
+    )
+    def _command_contract(command_id: str) -> str:
+        spec = registry.get(command_id)
+        if spec is None:
+            # A template that 404s on a bad id is a dead end for an agent.
+            # Raising with the valid set turns the mistake into a
+            # self-correction in one step.
+            raise ResourceError(
+                f"unknown command {command_id!r}. Valid ids: {sorted(registry.BY_ID)}"
+            )
+        return json.dumps(spec.describe(), indent=2, sort_keys=True)
 
     @server.resource(
         "netverify://contract",
@@ -468,7 +733,22 @@ def build_server() -> Any:
 
 
 def main() -> None:
-    """Serve over stdio."""
+    """Serve over stdio.
+
+    Telemetry is configured first, and before the server exists, because the
+    SDK's middleware reads the global tracer provider when a request arrives -
+    a provider attached after the first call would miss it.
+
+    Configuration is opt-in through the environment (`OTEL_EXPORTER_OTLP_ENDPOINT`
+    or `NETVERIFY_OTEL_CONSOLE=1`). With neither set, no provider is installed
+    and the SDK's spans stay a no-op, which is the right default: a server
+    silently buffering spans nobody exports is worse than one that emits none.
+    """
+    from netverify import configure_from_env
+
+    if configure_from_env():
+        # stderr, never stdout: on stdio the protocol owns stdout.
+        print("netverify: tracing enabled", file=sys.stderr)
     build_server().run()
 
 

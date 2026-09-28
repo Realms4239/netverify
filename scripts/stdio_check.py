@@ -111,10 +111,16 @@ def main() -> int:
         else:
             names = {t["name"] for t in tools}
             expected = {
+                # Single-command verification, and the two that harden its input.
                 "verify_network_output",
                 "sanitize_device_output",
                 "audit_device_output",
+                # Batch and aggregate reasoning: the operator workflows.
                 "verify_capture",
+                "synthesize_health",
+                "compare_captures",
+                # Self-description, so a caller can check its claims.
+                "self_check",
             }
             if names != expected:
                 failures.append(f"expected {sorted(expected)}, got {sorted(names)}")
@@ -140,7 +146,7 @@ def main() -> int:
 
     print("STDIO CHECK OK")
     print(f"  server/discover advertised {PROTOCOL_VERSION} over a real pipe")
-    print("  tools/list returned 4 read-only tools, stdout stayed pure JSON-RPC")
+    print(f"  tools/list returned {len(expected)} read-only tools, stdout stayed pure JSON-RPC")
     return 0
 
 

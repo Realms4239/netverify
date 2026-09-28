@@ -6,6 +6,7 @@ backwards, a sink that breaks, and an audit log that becomes a second copy of
 the secret it was written to catch.
 """
 
+import contextlib
 import io
 import json
 import sys
@@ -99,13 +100,27 @@ class TestAuditLog(unittest.TestCase):
         self.assertEqual(sink.getvalue(), "")
 
     def test_a_broken_sink_does_not_raise(self):
-        """A logging failure must not take down the call it describes."""
+        """A logging failure must not take down the call it describes.
+
+        The sink raises, and `record` reports the failure on stderr with a
+        traceback rather than swallowing it. stderr is captured here so the
+        expected report does not pollute the run - otherwise every suite run
+        prints a traceback that looks like a real fault, which trains people to
+        ignore the one that matters.
+        """
 
         class Exploding(io.StringIO):
             def write(self, *_args):
                 raise OSError("disk full")
 
-        AuditLog(Exploding(), enabled=True).record("verify")  # must not raise
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            AuditLog(Exploding(), enabled=True).record("verify")
+
+        # Not raised, *and* reported. Silently dropping an audit record would
+        # turn a control into something nobody notices is missing.
+        self.assertIn("audit sink failed", captured.getvalue())
+        self.assertIn("disk full", captured.getvalue())
 
     def test_default_sink_is_stderr_not_stdout(self):
         """stdout is the protocol channel on stdio; a stray write corrupts it."""

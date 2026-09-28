@@ -28,6 +28,9 @@ dev = ["bandit==1.9.4", "ruff==0.16.9", "pytest==9.1.1"]
 
 [project.scripts]
 netverify = "server.app:main"
+# The CLI is the entry point for the audience that has never heard of MCP: an
+# engineer with a `show` output in a text file. Same library, same guarantees.
+netverify-cli = "netverify.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Realms4239/netverify"

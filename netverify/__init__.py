@@ -24,20 +24,27 @@ Adding a check means adding one `CommandSpec` to `registry.py`. Nothing else
 changes.
 """
 
+from .analysis import compare_states, synthesize_health
 from .errors import RateLimited, ScopeError
-from .limits import TokenBucket
+from .integrity import self_check
+from .limits import DEFAULT_DEADLINE_SECONDS, Deadline, DeadlineExceeded, TokenBucket
 from .models import Check, Finding, Outcome, SanitizeReport, Verdict
 from .registry import COMMANDS, CommandSpec, describe_all, get
 from .sanitize import MAX_BYTES, sanitize, scan
 from .scope import validate
+from .telemetry import configure_from_env
+from .telemetry import status as telemetry_status
 from .verify import MAX_BATCH_ITEMS, verify, verify_many
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
-    "Check",
     "COMMANDS",
+    "Check",
     "CommandSpec",
+    "DEFAULT_DEADLINE_SECONDS",
+    "Deadline",
+    "DeadlineExceeded",
     "Finding",
     "MAX_BATCH_ITEMS",
     "MAX_BYTES",
@@ -47,10 +54,15 @@ __all__ = [
     "ScopeError",
     "TokenBucket",
     "Verdict",
+    "compare_states",
+    "configure_from_env",
     "describe_all",
     "get",
     "sanitize",
     "scan",
+    "self_check",
+    "synthesize_health",
+    "telemetry_status",
     "validate",
     "verify",
     "verify_many",

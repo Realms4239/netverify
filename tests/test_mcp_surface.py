@@ -31,9 +31,30 @@ class TestToolSurface(unittest.TestCase):
 
         return asyncio.run(self.server.list_tools())
 
-    def test_exactly_four_tools_are_published(self):
-        tools = self._tools()
-        self.assertEqual(len(tools), 4, f"expected 4, found {[t.name for t in tools]}")
+    def test_the_expected_tools_are_published(self):
+        """The exact tool set, pinned at the runtime layer too.
+
+        `test_contract.py` freezes the same names; this repeats the assertion
+        here so a change to `build_server` fails in the surface suite as well,
+        rather than only in the contract suite where it is easier to overlook.
+        """
+        names = {t.name for t in self._tools()}
+        self.assertEqual(
+            names,
+            {
+                # Single-command verification, and the two that harden its input.
+                "verify_network_output",
+                "sanitize_device_output",
+                "audit_device_output",
+                # Batch and aggregate reasoning: the operator workflows.
+                "verify_capture",
+                "synthesize_health",
+                "compare_captures",
+                # Self-description.
+                "self_check",
+            },
+            f"unexpected tool surface: {sorted(names)}",
+        )
 
     def test_every_tool_declares_itself_read_only(self):
         """The annotations must match the implementation, not flatter it."""
