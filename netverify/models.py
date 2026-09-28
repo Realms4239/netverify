@@ -22,11 +22,16 @@ from typing import Any
 class Outcome(StrEnum):
     """Why a check produced the result it did.
 
-    Split deliberately: `FAIL` means the network is unhealthy, `INPUT_ERROR`
-    means the text could not be interpreted, and `REFUSED` means the request
-    was never a legal one. Collapsing these into a boolean is how tools end up
-    telling an operator their router is down when the real problem is a
-    truncated paste.
+    Split deliberately: `FAIL` means the network is unhealthy and `INPUT_ERROR`
+    means the text could not be interpreted. Collapsing these into a boolean is
+    how a tool ends up telling an operator their router is down when the real
+    problem is a truncated paste.
+
+    There is deliberately no `REFUSED` member. A refusal - unknown command,
+    missing argument, oversize input - raises `ScopeError` instead of returning
+    a `Verdict`, because a refusal is not a statement about the network and
+    putting it in this enum would invite a caller to read it as one. Callers
+    catch `ValueError` for refusals and branch on `ok` for everything else.
     """
 
     PASS = "pass"

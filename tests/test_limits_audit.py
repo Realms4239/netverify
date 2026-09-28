@@ -71,7 +71,7 @@ class TestTokenBucket(unittest.TestCase):
 class TestAuditLog(unittest.TestCase):
     def test_writes_json_lines(self):
         sink = io.StringIO()
-        log = AuditLog(sink, clock=lambda: 1.0)
+        log = AuditLog(sink, clock=lambda: 1.0, enabled=True)
         log.record("verify", command_id="ping", ok=True, outcome="pass")
         entry = json.loads(sink.getvalue().strip())
         self.assertEqual(entry["event"], "verify")
@@ -80,7 +80,7 @@ class TestAuditLog(unittest.TestCase):
 
     def test_omits_absent_fields_rather_than_writing_nulls(self):
         sink = io.StringIO()
-        AuditLog(sink, clock=lambda: 1.0).record("ping")
+        AuditLog(sink, clock=lambda: 1.0, enabled=True).record("ping")
         entry = json.loads(sink.getvalue().strip())
         self.assertNotIn("ok", entry)
         self.assertNotIn("command_id", entry)
@@ -88,7 +88,7 @@ class TestAuditLog(unittest.TestCase):
     def test_never_records_the_payload(self):
         """An audit log must not become a second copy of the secret."""
         sink = io.StringIO()
-        AuditLog(sink).record("verify", command_id="ping", detail="a reason")
+        AuditLog(sink, enabled=True).record("verify", command_id="ping", detail="a reason")
         entry = json.loads(sink.getvalue().strip())
         self.assertNotIn("output", entry)
         self.assertNotIn("payload", entry)
@@ -105,7 +105,7 @@ class TestAuditLog(unittest.TestCase):
             def write(self, *_args):
                 raise OSError("disk full")
 
-        AuditLog(Exploding()).record("verify")  # must not raise
+        AuditLog(Exploding(), enabled=True).record("verify")  # must not raise
 
     def test_default_sink_is_stderr_not_stdout(self):
         """stdout is the protocol channel on stdio; a stray write corrupts it."""

@@ -62,6 +62,15 @@ jobs:
       - name: Run the eval gate
         run: python evals/run_evals.py
 
+      - name: Mutation test
+        # Proves the suite has teeth. A suite that stays green when the security
+        # code is wrong is the failure mode this catches, and coverage numbers
+        # cannot tell you about it. Not run on every PR because it re-runs the
+        # whole suite once per mutant; it runs on the default branch and on
+        # manual dispatch.
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        run: python scripts/mutation_test.py
+
       - name: End-to-end MCP smoke test
         run: python scripts/smoke_test.py
 

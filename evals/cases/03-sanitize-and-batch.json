@@ -17,6 +17,26 @@
       "expect_contains": ["password="]
     },
     {
+      "name": "sanitize masks a vendor token whatever it is labelled",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_MISLABELLED_TOKEN",
+      "expect_kinds": ["known_token_format"],
+      "expect_absent": ["AKIAIOSFODNN7EXAMPLE"]
+    },
+    {
+      "name": "sanitize is idempotent on already-bracketed text",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_ALREADY_BRACKETED",
+      "expect_contains": ["[untrusted-content:"],
+      "expect_absent": ["[untrusted-content:[untrusted-content:"]
+    },
+    {
+      "name": "sanitize bounds the work on an oversize payload",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_OVERSIZE",
+      "expect_truncated": true
+    },
+    {
       "name": "sanitize neutralises a verdict coercion",
       "kind": "sanitize",
       "output_ref": "OUTPUT_WITH_INJECTION",

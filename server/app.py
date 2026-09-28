@@ -37,6 +37,7 @@ from mcp_types import ToolAnnotations
 
 from netverify import (
     COMMANDS,
+    MAX_BATCH_ITEMS,
     MAX_BYTES,
     TokenBucket,
     describe_all,
@@ -237,13 +238,31 @@ def verify_capture(commands: list[dict[str, Any]]) -> dict[str, Any]:
     entry is identifiable rather than fatal.
 
     Args:
-        commands: List of {command, output, ...arguments} objects.
+        commands: List of {command, output, ...arguments} objects, at most
+            `MAX_BATCH_ITEMS` of them.
 
     Returns:
         {results, ok_count, failed_count, refused_count} where each result is
         either a verdict or {refused: message} for that entry.
     """
-    _charge(cost=1.0)
+    # Validate the batch shape *before* charging, so an oversize request is
+    # refused for the right reason rather than as a rate-limit failure.
+    if not isinstance(commands, list):
+        raise ToolError(f"commands must be a list of captures, got {type(commands).__name__}")
+    if len(commands) > MAX_BATCH_ITEMS:
+        raise ToolError(
+            f"batch has {len(commands)} entries, above the {MAX_BATCH_ITEMS} limit. "
+            "Split it into several calls."
+        )
+
+    # Charged per item, not once per call. An earlier version charged a flat
+    # 1.0 while its own comment claimed proportionality, which meant a single
+    # 20 000-entry batch cost the same as one ping - the exact loophole a limit
+    # exists to close. Verified with the 200-item cap above, the worst case is
+    # now 200 tokens, so a runaway loop still exhausts the bucket and gets told
+    # to back off.
+    _charge(cost=float(max(1, len(commands))))
+
     started = time.perf_counter()
     raw = verify_many(commands, audit=AUDIT)
 

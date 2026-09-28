@@ -72,6 +72,13 @@ ignore = [
 # it to catch. S105/S106 flag those as hardcoded secrets. The suppression is
 # scoped to this one file; a real secret elsewhere still fails the build.
 "tests/fixtures.py" = ["S105", "S106", "S107"]
+# The property suite generates hostile input with a *seeded* PRNG. S311 warns
+# that `random` is unfit for cryptography, which is true and irrelevant: a fixed
+# seed is exactly what makes a fuzz failure reproducible rather than a flake
+# that gets re-run until it passes. No secret is derived from it.
+"tests/test_properties.py" = ["S311"]
+# Same reasoning for the fake clock in the rate-limiter tests.
+"tests/test_limits_audit.py" = ["S311"]
 # models.py has an enum member literally named PASS. S105 reads the identifier as
 # "hardcoded password", which it is not. The name is fixed by the Outcome enum's
 # meaning and cannot be changed to satisfy a linter.

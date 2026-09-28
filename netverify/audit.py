@@ -25,6 +25,7 @@ logging turns a control into a liability.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from typing import Any, TextIO
@@ -33,6 +34,27 @@ from typing import Any, TextIO
 def _default_sink() -> TextIO:
     # stderr, always. stdout is the protocol channel on stdio.
     return sys.stderr
+
+
+def _default_enabled() -> bool:
+    """Whether audit logging is on unless told otherwise.
+
+    Defaults to on, because an audit log nobody knows is off is still a control
+    and can be turned on in one place. `NETVERIFY_AUDIT=0` silences it, which
+    matters for the test suite - a green run should not be buried under
+    thousands of JSON lines - and for anyone who wants the server quiet in a
+    terminal.
+
+    Read at construction rather than at write time so that setting it later in
+    a test takes effect, which is what makes the suite able to assert on audit
+    output at all.
+    """
+    return os.environ.get("NETVERIFY_AUDIT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 class AuditLog:
@@ -50,11 +72,11 @@ class AuditLog:
         sink: TextIO | None = None,
         *,
         clock: Any = time.time,
-        enabled: bool = True,
+        enabled: bool | None = None,
     ) -> None:
         self._sink = sink if sink is not None else _default_sink()
         self._clock = clock
-        self.enabled = enabled
+        self.enabled = _default_enabled() if enabled is None else enabled
 
     def record(
         self,

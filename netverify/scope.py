@@ -33,12 +33,32 @@ __all__ = ["ScopeError", "validate", "MAX_BYTES"]
 
 
 def _require_text(value: Any, field: str) -> str:
-    """Coerce a field to text, rejecting the types an agent should not send."""
+    """Coerce a field to text, rejecting the types an agent should not send.
+
+    Also enforces the argument's declared shape. Whitespace, newlines and
+    quotes are refused because arguments are interpolated into the verdict's
+    `check` and `reasons` fields, so an argument carrying a newline lets a
+    caller forge an extra line into text an agent may read as a separate
+    finding. That is output injection, and secret redaction cannot stop it - a
+    forged line is not a secret.
+    """
     if not isinstance(value, str):
         raise ScopeError(f"{field} must be a string, got {type(value).__name__}")
     text = value.strip()
     if not text:
         raise ScopeError(f"{field} must not be empty")
+    if any(ch in text for ch in "\r\n\t"):
+        raise ScopeError(
+            f"{field} must not contain line breaks or tabs; it is quoted back in "
+            f"the verdict, so a newline would forge a new line of output. Got: "
+            f"{text[:40]!r}"
+        )
+    pattern = registry.ARGUMENT_PATTERNS.get(field)
+    if pattern is not None and not pattern.match(text):
+        raise ScopeError(
+            f"{field}={text!r} is not a valid {field.replace('_', ' ')}. "
+            f"Expected something matching {pattern.pattern}."
+        )
     return text
 
 

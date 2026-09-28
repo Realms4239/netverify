@@ -176,19 +176,63 @@ Langfuse self-hosted tracing) are seeded in `promptfooconfig.yaml` but
 **deliberately not wired into CI**: they need a model key, and a job that
 silently skips is worse than no job.
 
+## How the suite is trusted
+
+A green test suite proves nothing on its own - it is equally consistent with
+correct code and with code whose bugs nothing happens to reach. Three layers
+address that, and all three are automated:
+
+**Property tests** (`tests/test_properties.py`) generate hostile input and assert
+invariants rather than examples: no secret survives sanitisation, sanitisation is
+idempotent, no argument resolves to a control character, `verify` only ever raises
+`ValueError`, batches stay positionally aligned. Seeded and deterministic, so a
+failure is reproducible rather than a flake that gets re-run until it passes.
+
+**Mutation testing** (`scripts/mutation_test.py`) applies ten realistic
+single-line mutations - skip normalisation, drop the redaction loop, unbound the
+batch, delete the idempotence guard - and asserts the suite *fails* on each. A
+survivor is a place the code could be wrong and nothing would notice. One
+survivor is tolerated, with the reason recorded in the file: the control-character
+check is defence in depth behind the argument patterns, so removing it is not
+distinguishable from correct behaviour today.
+
+It also found a real gap. A mutant that broke secret *reporting* inside `scan`
+passed the entire suite, because every secret assertion went through `sanitize`,
+which has its own redaction loop. The audit tool could have returned "clean" for
+text full of credentials and nothing failed. There is now a per-pattern test.
+
+**Negative controls** elsewhere: the vendored-parity checker is fed a
+deliberately perturbed file and must exit 1; the mutating-verb guard is fed
+`configure terminal` and must flag it.
+
+Two invariants I wrote were themselves wrong, and the property suite caught both
+rather than letting them harden into false confidence:
+
+- "Re-scanning sanitised output finds no injection" is unachievable, because the
+  evidence deliberately stays readable inside the bracket. The real property is
+  that no injection text sits *outside* a bracket.
+- A canary of `AAAA` after `key:` is not a secret, and the test only passed
+  because unrelated noise happened to be masked. Canaries are now realistic
+  instances of each pattern, with an assertion that the noise does not contain
+  them.
+
 ## Development
 
 ```sh
-python -m unittest discover -s tests -t .   # 76 tests, stdlib only
-python evals/run_evals.py                   # 35 eval cases
+python -m unittest discover -s tests -t .   # 96 tests, stdlib only
+python evals/run_evals.py                   # 38 eval cases
 python scripts/smoke_test.py                # MCP round trip, in-memory
 python scripts/stdio_check.py               # real process, real pipe
+python scripts/mutation_test.py             # proves the suite has teeth
 python scripts/check_upstream_parity.py     # vendored copy vs pinned upstream
 ```
 
-The first three need no network, no model, and no secrets. The stdio check exists
-because the in-memory test cannot catch the most common way an MCP server
-breaks: printing to stdout, which on that transport *is* the protocol channel.
+The first four need no network, no model, and no secrets. The mutation test
+re-runs the whole suite once per mutant, so CI runs it on the default branch
+rather than on every pull request. `NETVERIFY_AUDIT=0` silences the audit log,
+which defaults to on because an audit log nobody knows is off is still a control
+- but which would otherwise bury a test run in thousands of JSON lines and teach
+people to ignore stderr entirely.
 
 ## CI
 
@@ -226,8 +270,38 @@ neighbours" because its callers assert on emptiness; a verifier that answers
 password=*******
 ```
 
-Six injection families are detected, grouped by intent rather than phrasing, so a
+Seven injection families are detected, grouped by intent rather than phrasing, so a
 reworded attack still lands in a known group: instruction override, role
-reassignment, verdict coercion, tool directive, exfiltration, secret request.
-Zero-width and bidi characters are removed, and NFKC folding runs *before*
-detection so a fullwidth `ｐａｓｓｗｏｒｄ` cannot slip past a pattern match.
+reassignment, verdict coercion, tool directive, exfiltration, secret request, and
+hidden characters. Zero-width and bidi characters are removed, and NFKC folding
+runs *before* detection so a fullwidth `ｐａｓｓｗｏｒｄ` cannot slip past a pattern
+match.
+
+Two properties of the neutralisation are load-bearing, and both are asserted as
+invariants over generated input rather than by example:
+
+- **It is idempotent.** The words stay visible inside the bracket, so an operator
+  can see what was attempted - but a span already inside a bracket is not
+  re-bracketed. Without that, sanitizing twice produced
+  `[untrusted-content:[untrusted-content:…]]` and every pass added another layer,
+  so a pipeline sanitising on ingest *and* on output grew the text without bound.
+- **No injection text sits outside a bracket.** The bracket is what makes it
+  quoted data rather than an instruction, so that is the property asserted - not
+  "re-scanning finds nothing", which is both unachievable and undesirable,
+  because the evidence has to stay readable.
+
+Credential detection works from two directions. Name-based patterns catch
+`password=`, `secret:`, `snmp-server community`. Format-based patterns catch
+unmistakable vendor token shapes (`ghp_…`, `AKIA…`, `AIza…`, JWT, Slack)
+*whatever they are labelled* - because the obvious attack is to call the field
+`note`.
+
+## Limits are enforced before the work, not after
+
+A 64 KiB cap that is applied once the regexes have already run is not a limit.
+Measured on this machine: a 20 MB input took **7.4 s** before the fix and
+**0.03 s** after, because truncation now happens first and bounds the scanning no
+matter what arrives. The same principle applies to batches: `verify_many` is
+capped at 200 entries, and `verify_capture` is charged per item rather than a flat
+token, so a runaway agent loop cannot route around the budget by choosing the
+batch tool.

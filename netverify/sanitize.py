@@ -56,6 +56,35 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "private_key_block",
         re.compile(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"),
     ),
+    # A bare `key: value` is far too generic to redact - it would match
+    # `monkey:`, `key: value` in a routing table, half the keys in a JSON dump -
+    # so credential patterns key off names. The gap that leaves is an attacker
+    # picking an innocent label. This pattern closes it from the other
+    # direction: credential *formats* that are unmistakable and effectively
+    # impossible to false-positive on, so they are caught even when
+    # deliberately mislabelled.
+    #
+    # Every entry is a vendor token prefix with a fixed shape. The cost of a
+    # false positive is one masked string, a far better failure than a live
+    # token reaching an audit log. Found by the property suite, which planted
+    # `key: ghp_...` and watched it survive untouched.
+    (
+        "known_token_format",
+        re.compile(
+            r"\b(?:"
+            r"gh[pousr]_[A-Za-z0-9]{20,}"  # GitHub classic/OAuth/user/server
+            r"|github_pat_[A-Za-z0-9_]{20,}"  # GitHub fine-grained
+            r"|glpat-[A-Za-z0-9\-_]{20,}"  # GitLab
+            r"|sk-ant-[A-Za-z0-9\-_]{20,}"  # Anthropic
+            r"|sk-[A-Za-z0-9\-_]{20,}"  # OpenAI-style
+            r"|xox[baprs]-[A-Za-z0-9-]{10,}"  # Slack
+            r"|AKIA[0-9A-Z]{16}"  # AWS access key id
+            r"|ASIA[0-9A-Z]{16}"  # AWS temporary
+            r"|AIza[0-9A-Za-z\-_]{30,}"  # Google API key
+            r"|eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]{10,}"
+            r")\b"
+        ),
+    ),
     (
         "enable_password",
         re.compile(r"(?i)\b(enable|ssh|vtysh)\s+password\s+\S+"),
@@ -127,6 +156,7 @@ _SEVERITY = {
     "credential": "high",
     "private_key_block": "critical",
     "enable_password": "high",
+    "known_token_format": "critical",
     "snmp_community": "high",
     "instruction_override": "critical",
     "role_reassignment": "high",
@@ -141,6 +171,9 @@ _DESCRIBE = {
     "credential": "a credential assignment was present and has been masked",
     "private_key_block": "a private key block was present and has been removed",
     "enable_password": "a privileged account password was present and has been masked",
+    "known_token_format": (
+        "a vendor API token was present, whatever it was labelled, and has been masked"
+    ),
     "snmp_community": "an SNMP community string was present and has been masked",
     "instruction_override": "text tried to override prior instructions",
     "role_reassignment": "text tried to reassign the assistant's role",
@@ -152,6 +185,81 @@ _DESCRIBE = {
 }
 
 
+def _cap(text: str, max_bytes: int) -> tuple[str, bool]:
+    """Trim `text` to `max_bytes`, cutting on a character boundary.
+
+    Returns the text and whether anything was dropped. A boundary-safe cut
+    matters because a split multi-byte character is not valid UTF-8, and the
+    result is serialised into JSON.
+    """
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
+def _prepare(text: str, max_bytes: int) -> tuple[str, bool]:
+    """Normalise and cap `text` BEFORE any pattern matching runs.
+
+    This ordering is the whole DoS story, so it is worth stating plainly.
+    Regex scanning is the expensive part - roughly 1.8 s per 10 MB here - and
+    the naive implementation scanned first and truncated afterwards. That made
+    the size cap useless as a work limit: any caller could hand over 20 MB and
+    pin a core for seconds, which the cap then silently hid by returning a
+    short result. A limit applied after the work is not a limit.
+
+    Truncating first is cheap - a byte slice and a decode - and bounds the
+    scanning to `max_bytes` no matter what arrives. Truncating rather than
+    refusing is deliberate: a 500 KB paste of real device output should still
+    be usable, with `truncated` telling the caller that the tail was dropped.
+    """
+
+    if not isinstance(text, str):
+        raise TypeError(f"text must be a str, got {type(text).__name__}")
+
+    # NFKC first: it folds fullwidth and compatibility forms, so a fullwidth
+    # "password" - which defeats both a regex and a human reviewer - collapses
+    # to ASCII. Doing this *after* detection would rewrite the attacker's
+    # payload into a detectable form only once the scan had already passed it.
+    safe = unicodedata.normalize("NFKC", text)
+
+    encoded = safe.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return safe, False
+    # Cut on a character boundary so the result stays valid UTF-8.
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
+#: Marker that opens a neutralised span, and the one that closes it. Reading
+#: these back out of text is how `sanitize` avoids re-bracketing its own output.
+OPEN_MARKER = "[untrusted-content:"
+CLOSE_MARKER = "]"
+
+
+def _bracketed_regions(text: str) -> list[tuple[int, int]]:
+    """Find the `[untrusted-content:...]` regions already present in `text`.
+
+    Needed for idempotence. The words inside a bracket are deliberately left
+    visible so an operator can see what was attempted, which means they still
+    match the injection patterns. Without this, sanitizing twice produces
+    `[untrusted-content:[untrusted-content:...]]` and every additional pass adds
+    another layer - so a pipeline that sanitises on ingest and again on output
+    would grow the text without bound. Verified by the property suite.
+    """
+    regions: list[tuple[int, int]] = []
+    cursor = 0
+    while True:
+        start = text.find(OPEN_MARKER, cursor)
+        if start == -1:
+            return regions
+        index = start + len(OPEN_MARKER)
+        while index < len(text) and text[index] != CLOSE_MARKER:
+            index += 1
+        end = index + 1 if index < len(text) else len(text)
+        regions.append((start, end))
+        cursor = end
+
+
 def _injection_spans(text: str) -> list[tuple[int, int, str]]:
     """Collect non-overlapping injection spans, most severe first.
 
@@ -160,11 +268,19 @@ def _injection_spans(text: str) -> list[tuple[int, int, str]]:
     `[untrusted-content:[untrusted-content:...]]` markers. Resolving spans
     before substituting means every character is bracketed exactly once, and
     the audit output stays readable.
+
+    Spans already inside a bracketed region are skipped, which is what makes
+    `sanitize` idempotent. See `_bracketed_regions`.
     """
+    already_neutralised = _bracketed_regions(text)
+
     candidates: list[tuple[int, int, str]] = []
     for kind, pattern in _INJECTION_PATTERNS:
         for match in pattern.finditer(text):
-            candidates.append((match.start(), match.end(), kind))
+            start, end = match.span()
+            if any(low <= start and end <= high for low, high in already_neutralised):
+                continue
+            candidates.append((start, end, kind))
     if not candidates:
         return []
 
@@ -193,7 +309,7 @@ def _apply_injection(kind: str, whole: str) -> str:
         # Removed rather than bracketed: these carry no meaning to a reader,
         # and leaving them in re-opens the hiding trick.
         return "[untrusted:hidden-char]"
-    return f"[untrusted-content:{whole}]"
+    return f"{OPEN_MARKER}{whole}{CLOSE_MARKER}"
 
 
 def _redact_secret(match: re.Match[str], kind: str) -> str:
@@ -216,14 +332,24 @@ def _redact_secret(match: re.Match[str], kind: str) -> str:
     return marker + "*" * max(0, len(whole) - len(marker))
 
 
-def scan(text: str) -> tuple[Finding, ...]:
-    """Report what is dangerous in `text` without modifying it.
+def scan(text: str, *, max_bytes: int = MAX_BYTES) -> tuple[Finding, ...]:
+    """Report what is dangerous in `text`, without modifying it.
 
     Split from `sanitize` so a caller can audit a capture without altering it,
     which is the useful mode in CI: the point there is to notice, not to clean.
+
+    Normalises and caps `text` exactly as `sanitize` does, and that shared step
+    is load-bearing for correctness as well as speed. An earlier version
+    normalised only inside `sanitize`, so a bare `scan` - which is what the
+    `audit_device_output` tool calls - missed a fullwidth `ｐａｓｓｗｏｒｄ`
+    entirely. The audit path was bypassable by anyone who typed the payload with
+    a script instead of a keyboard. Offsets are into the normalised, capped
+    text; see `_prepare`.
     """
+    prepared, _ = _prepare(text, max_bytes)
+
     findings: list[Finding] = []
-    for start, _, kind in _injection_spans(text):
+    for start, _, kind in _injection_spans(prepared):
         findings.append(
             Finding(
                 kind=kind,
@@ -233,7 +359,7 @@ def scan(text: str) -> tuple[Finding, ...]:
             )
         )
     for kind, pattern in _SECRET_PATTERNS:
-        for match in pattern.finditer(text):
+        for match in pattern.finditer(prepared):
             findings.append(
                 Finding(
                     kind=kind,
@@ -254,41 +380,33 @@ def sanitize(text: str, *, max_bytes: int = MAX_BYTES) -> SanitizeReport:
     silent. The original text is deliberately not returned: a sanitizer that
     hands back both invites callers to use the wrong one.
 
-    Truncation happens after redaction, so a secret cannot survive as a
-    half-visible fragment at the cut.
+    Bounding happens first and redaction second. That order is a security
+    property, not a performance tweak - see `_prepare`.
     """
-    if not isinstance(text, str):
-        raise TypeError(f"text must be a str, got {type(text).__name__}")
+    safe, truncated = _prepare(text, max_bytes)
 
-    # Normalise FIRST, then detect. This ordering is a security property, not a
-    # cosmetic one: NFKC folds fullwidth and compatibility forms, so a
-    # fullwidth "password" - which defeats both the pattern and a human
-    # reviewer - collapses to ASCII. Normalising afterwards would rewrite the
-    # attacker's payload into a detectable one *after* the scan had already
-    # passed it, which is the worst possible order.
-    safe = unicodedata.normalize("NFKC", text)
+    findings = list(scan(safe, max_bytes=max_bytes))
 
-    findings = list(scan(safe))
-
-    # Injections first, then secrets. The order matters: secret redaction
-    # rewrites spans, which would shift the offsets the injection spans were
-    # computed against, and a neutralised injection must never be able to hide a
-    # credential by changing its own length.
+    # Injections first, then secrets. Secret redaction rewrites spans, which
+    # would shift the offsets the injection spans were computed against, and a
+    # neutralised injection must never hide a credential by changing length.
     for start, end, kind in reversed(_injection_spans(safe)):
         safe = safe[:start] + _apply_injection(kind, safe[start:end]) + safe[end:]
 
     for kind, pattern in _SECRET_PATTERNS:
-        # A `functools.partial` binds `kind` and the current `safe` value without
-        # any closure over the loop variable, which is what B023 warns about.
-        # The substitution is still applied to the freshly returned string, so
-        # each pattern sees the output of the previous one.
+        # `functools.partial` binds `kind` without capturing the loop variable,
+        # which a closure would do, mislabelling every span after the first.
         safe = pattern.sub(partial(_redact_secret, kind=kind), safe)
 
-    truncated = False
-    encoded = safe.encode("utf-8", errors="replace")
-    if len(encoded) > max_bytes:
-        # Cut on a character boundary so the result stays valid UTF-8.
-        safe = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    # Cap again. `_prepare` bounded the *input*, but substitution can grow the
+    # text: every `[untrusted-content:...]` and `[redacted:...]` marker is longer
+    # than what it replaced, so output was measured at 1044 bytes for a 1024 cap
+    # in the property suite. That matters because the cap is a context budget as
+    # well as a DoS bound, and a caller relying on it for either purpose is
+    # being handed more than it asked for. A marker cut by this final pass is an
+    # acceptable edge case - the payload was already being truncated.
+    capped, cut = _cap(safe, max_bytes)
+    if cut:
         truncated = True
 
-    return SanitizeReport(safe_text=safe, findings=tuple(findings), truncated=truncated)
+    return SanitizeReport(safe_text=capped, findings=tuple(findings), truncated=truncated)

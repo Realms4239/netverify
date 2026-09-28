@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from .audit import DEFAULT
+from .errors import ScopeError
 from .models import Outcome, Verdict
 from .sanitize import sanitize
 from .scope import validate
@@ -88,6 +89,15 @@ def verify(
     return verdict
 
 
+#: Maximum entries in one `verify_many` call.
+#:
+#: Without a cap, a single agent request could carry 20 000 captures and occupy
+#: the process for seconds - a denial of service delivered through the tool
+#: surface, which is the one place an agent already has sanctioned access. 200
+#: is far above any real incident capture and well under a second of work.
+MAX_BATCH_ITEMS = 200
+
+
 def verify_many(items: list[dict[str, Any]], *, audit: Any = DEFAULT) -> list[Verdict | Exception]:
     """Verify a batch, one result per input, in order.
 
@@ -99,9 +109,31 @@ def verify_many(items: list[dict[str, Any]], *, audit: Any = DEFAULT) -> list[Ve
     Refusals are returned as the exception object rather than raised, so the
     caller can tell *which* input was rejected. Re-raising would lose the
     positional correspondence.
+
+    Raises:
+        ScopeError: if `items` is not a list, or carries more than
+            `MAX_BATCH_ITEMS` entries. Both are refusals about the shape of the
+            request rather than about one entry, so they are raised rather than
+            returned - there is no meaningful per-entry answer to give. An entry
+            that is not an object is handled per-entry, since that one *is* a
+            positional answer.
     """
+    if not isinstance(items, list):
+        raise ScopeError(f"expected a list of captures, got {type(items).__name__}")
+    if len(items) > MAX_BATCH_ITEMS:
+        raise ScopeError(
+            f"batch has {len(items)} entries, above the {MAX_BATCH_ITEMS} limit. "
+            "Split it into several calls; one oversized batch would block the "
+            "server for every other caller."
+        )
+
     results: list[Verdict | Exception] = []
     for item in items:
+        if not isinstance(item, dict):
+            results.append(
+                ScopeError(f"capture entry must be an object, got {type(item).__name__}")
+            )
+            continue
         try:
             results.append(
                 verify(

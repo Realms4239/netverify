@@ -44,3 +44,13 @@ repos:
         language: system
         files: ^netverify/parsers/
         pass_filenames: false
+
+      - id: mutation-test
+        name: mutation test
+        # Not in the default pre-commit path: it re-runs the whole suite once per
+        # mutant, far too slow for every commit. It runs in CI on the default
+        # branch. Invoke it by hand with: python scripts/mutation_test.py
+        entry: "echo 'run: python scripts/mutation_test.py'"
+        language: system
+        files: ^scripts/mutation_test\.py$
+        pass_filenames: false
