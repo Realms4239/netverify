@@ -10,3 +10,10 @@ bandit==1.9.4
 ruff==0.16.9
 pytest==9.1.1
 
+# Needed only to *assert* that spans are actually emitted. `mcp` already pulls in
+# opentelemetry-api, which is enough to import and to no-op; the SDK adds a
+# TracerProvider and an in-memory exporter, which is what lets
+# tests/test_telemetry.py prove the instrumentation fires rather than assume it.
+# The library itself never imports this - see scripts/check_dependencies.py.
+opentelemetry-sdk==1.45.0
+

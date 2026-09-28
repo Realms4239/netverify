@@ -106,25 +106,29 @@ def configure_from_env() -> bool:
 
 
 @contextmanager
-def span(name: str, **attributes: Any) -> Iterator[None]:
+def span(name: str, **attributes: Any) -> Iterator[Any]:
     """Record a span if OpenTelemetry is present, otherwise do nothing.
+
+    Yields the active span, or `None` when uninstrumented, so a caller can set
+    attributes that are only known once the work is done - a verdict, a count.
+    Callers must therefore guard the `None` case rather than assume a span.
 
     Uses `record_exception=False` and `set_status_on_exception=False` because
     a failing tool call is not an exceptional condition - it is a *result* the
-    operator wants to see counted. A failure is recorded by the caller through
-    explicit attributes, because "this link is down" and "the server crashed"
-    are different facts and an error-status span would blur them.
+    operator wants to see counted. A failure is recorded through explicit
+    attributes, because "this link is down" and "the server crashed" are
+    different facts and an error-status span would blur them.
     """
     if _TRACER is None:
-        yield
+        yield None
         return
     with _TRACER.start_as_current_span(
         name,
         record_exception=False,
         set_status_on_exception=False,
         attributes={k: v for k, v in attributes.items() if v is not None},
-    ):
-        yield
+    ) as active:
+        yield active
 
 
 def status() -> dict[str, Any]:

@@ -106,7 +106,36 @@ class TestToolContract(unittest.TestCase):
         self.assertEqual({str(r.uri) for r in listed}, RESOURCE_URIS)
 
     def test_templates_are_discoverable(self):
-        """A template that is not advertised is a feature nobody can find."""
+        """A template that is not advertised is a feature nobody can find.
+
+        This previously had a docstring and no assertion, so it passed
+        unconditionally - a green test that checked nothing, which is worse than
+        no test because it inflates the count. It now asserts the thing the
+        docstring describes.
+        """
+        import asyncio
+
+        templates = asyncio.run(self.server.list_resource_templates())
+        self.assertEqual({str(t.uri_template) for t in templates}, TEMPLATE_URIS)
+
+    def test_template_reads_a_real_command_and_rejects_a_fake_one(self):
+        """The per-command template is the discovery path for command ids.
+
+        If it resolved a made-up id, the "documented contract" resource would
+        quietly return something plausible and an agent would build a plan on a
+        command that does not exist.
+        """
+        import asyncio
+
+        from mcp.server.mcpserver.exceptions import ResourceError
+
+        contents = list(
+            asyncio.run(self.server.read_resource("netverify://commands/frr_bgp_summary"))
+        )
+        self.assertIn("frr_bgp_summary", contents[0].content)
+
+        with self.assertRaises(ResourceError):
+            asyncio.run(self.server.read_resource("netverify://commands/not_a_command"))
 
     def test_command_ids_are_discoverable(self):
         """A client must be able to learn the command ids from the server.

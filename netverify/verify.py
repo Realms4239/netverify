@@ -24,7 +24,12 @@ from .scope import validate
 from .telemetry import (
     ATTR_COMMAND_ID,
     ATTR_INPUT_BYTES,
+    ATTR_OPERATION,
+    ATTR_OUTPUT_BYTES,
     ATTR_PLATFORM,
+    ATTR_TOOL,
+    ATTR_VERDICT_OK,
+    ATTR_VERDICT_OUTCOME,
     span,
 )
 
@@ -56,18 +61,23 @@ def verify(
     spec = request["spec"]
     started = time.perf_counter()
 
-    # The verdict attributes are attached to the SDK's own SERVER span rather
-    # than to a nested one. A failing check is a *result*, not an exception, and
-    # recording it where the tool call is recorded means a trace answers "did
-    # this link pass?" without anyone having to correlate two spans.
+    # One span carries the whole story of the check. The verdict attributes
+    # belong here rather than on the SDK's SERVER span because this span is
+    # already a child of it: reading the child answers "did this link pass?"
+    # without correlating anything. A failing check is a *result*, not an
+    # exception, so it is recorded as attributes and never as an error event -
+    # a dashboard counting exceptions would otherwise report a working network
+    # as broken.
     with span(
         "netverify.verify",
         **{
+            ATTR_OPERATION: "verify",
+            ATTR_TOOL: spec.id,
             ATTR_COMMAND_ID: spec.id,
             ATTR_PLATFORM: spec.platform,
             ATTR_INPUT_BYTES: len(request["output"]),
         },
-    ):
+    ) as active:
         check = spec.check(request["output"], **request["arguments"])
 
         if sanitize_output:
@@ -97,6 +107,14 @@ def verify(
             reasons=reasons,
             arguments=request["arguments"],
         )
+
+        # Set after the work, because they are only knowable afterwards. This is
+        # the whole point of instrumenting a verifier: a trace answers "did this
+        # link pass, and how big was the input" without anyone reading logs.
+        if active is not None:
+            active.set_attribute(ATTR_VERDICT_OK, verdict.ok)
+            active.set_attribute(ATTR_VERDICT_OUTCOME, verdict.outcome.value)
+            active.set_attribute(ATTR_OUTPUT_BYTES, len(observed))
 
     if audit is not None:
         audit.record(
