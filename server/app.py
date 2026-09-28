@@ -56,6 +56,8 @@ from netverify.audit import DEFAULT as AUDIT
 from netverify.context import bind_request_id
 from netverify.errors import RateLimited, ScopeError
 
+from .prompts import register as register_prompts
+
 SERVER_NAME = "netverify"
 SERVER_VERSION = "1.0.0"
 
@@ -752,6 +754,10 @@ def build_server() -> Any:
     )
     def _security() -> str:
         return _security_resource()
+
+    # The third server feature. Tools and resources say what the server can do;
+    # the prompt says how to use them, in the order that is actually correct.
+    register_prompts(server)
 
     return server
 

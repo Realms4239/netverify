@@ -137,6 +137,22 @@ def main() -> int:
                 annotations = tool.get("annotations") or {}
                 if not annotations.get("readOnlyHint"):
                     failures.append(f"{tool['name']} is not annotated read-only")
+        # The prompt has to survive the real wire too. A prompt that renders
+        # in-process but 404s over a pipe is invisible in every client, and
+        # prompts/list is the only way a user discovers it. Asked before the
+        # tools/call below, which closes stdin and lets the server exit.
+        process.stdin.write(_request(3, "prompts/list"))
+        process.stdin.flush()
+        prompts_line = process.stdout.readline()
+        try:
+            prompt_names = {
+                p["name"] for p in json.loads(prompts_line.decode("utf-8"))["result"]["prompts"]
+            }
+        except (json.JSONDecodeError, KeyError, IndexError, UnicodeDecodeError) as exc:
+            failures.append(f"prompts/list did not return prompts: {exc}")
+        else:
+            if prompt_names != {"triage_capture"}:
+                failures.append(f"expected prompts ['triage_capture'], got {sorted(prompt_names)}")
 
         # The real proof that audit correlation works end to end, and it has to
         # live here rather than in a unit test. `MCPServer.call_tool()` is the
@@ -184,6 +200,7 @@ def main() -> int:
                 )
             elif not all(e.get("request_id") == "77" for e in entries):
                 failures.append(f"audit lines are not correlated to request 77: {entries}")
+
     except BrokenPipeError:
         failures.append("the server closed stdout before answering; it likely crashed")
     finally:
@@ -204,6 +221,7 @@ def main() -> int:
     print(f"  server/discover advertised {PROTOCOL_VERSION} over a real pipe")
     print(f"  tools/list returned {len(expected)} read-only tools, stdout stayed pure JSON-RPC")
     print("  a real tools/call was correlated to its request id in the audit log")
+    print("  prompts/list returned the triage workflow over the wire")
     return 0
 
 

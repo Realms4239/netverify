@@ -46,6 +46,7 @@ EXPECTED_RESOURCES = {
     "netverify://errors",
 }
 EXPECTED_TEMPLATES = {"netverify://commands/{command_id}"}
+EXPECTED_PROMPTS = {"triage_capture"}
 
 
 async def main() -> int:
@@ -65,6 +66,15 @@ async def main() -> int:
     resources = {str(r.uri) for r in await server.list_resources()}
     if resources != EXPECTED_RESOURCES:
         failures.append(f"expected {sorted(EXPECTED_RESOURCES)}, got {sorted(resources)}")
+
+    prompts = await server.list_prompts()
+    if {p.name for p in prompts} != EXPECTED_PROMPTS:
+        failures.append(
+            f"expected prompts {sorted(EXPECTED_PROMPTS)}, got {sorted(p.name for p in prompts)}"
+        )
+    rendered = await server.get_prompt("triage_capture", {})
+    if "sanitize_device_output" not in rendered.messages[0].content.text:
+        failures.append("the triage prompt lost its sanitise-first instruction")
 
     # The command template is what lets an agent read one command's contract on
     # demand, so its absence is a real loss of discoverability, not a detail.

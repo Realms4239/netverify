@@ -44,6 +44,13 @@ RESOURCE_URIS = {
 #: `uri_template` in mcp 2.x; the wire format is camelCase.
 TEMPLATE_URIS = {"netverify://commands/{command_id}"}
 
+#: Prompts, as listed by `prompts/list`. The third server feature, after tools
+#: and resources: tools say what the server can do, resources say what it
+#: guarantees, and the prompt says how to use them in the order that is
+#: actually correct. Renaming one breaks every client that offers it in a
+#: picker, so it belongs in the frozen surface like everything else.
+PROMPT_NAMES = {"triage_capture"}
+
 #: Arguments `verify_network_output` must accept. Kept explicit because the
 #: schema is generated from the signature, so a renamed or dropped parameter is
 #: a contract break even though the code still works.
@@ -104,6 +111,22 @@ class TestToolContract(unittest.TestCase):
 
         listed = asyncio.run(self.server.list_resources())
         self.assertEqual({str(r.uri) for r in listed}, RESOURCE_URIS)
+
+    def test_prompt_names_are_frozen(self):
+        import asyncio
+
+        listed = asyncio.run(self.server.list_prompts())
+        self.assertEqual({p.name for p in listed}, PROMPT_NAMES)
+
+    def test_every_prompt_carries_a_description(self):
+        """An empty description is a prompt a client shows as a bare name in its
+        picker, which is worse than not offering it."""
+        import asyncio
+
+        for prompt in asyncio.run(self.server.list_prompts()):
+            with self.subTest(prompt=prompt.name):
+                self.assertTrue(prompt.description, f"{prompt.name} has no description")
+                self.assertTrue(prompt.title, f"{prompt.name} has no title")
 
     def test_templates_are_discoverable(self):
         """A template that is not advertised is a feature nobody can find.
