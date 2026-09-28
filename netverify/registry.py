@@ -57,6 +57,48 @@ MUTATING_VERBS: tuple[str, ...] = (
 )
 
 
+#: A dotted quad with each octet in 0-255, written out rather than left to a
+#: numeric range check, because a regex cannot compare magnitudes and a
+#: post-hoc `int()` check would have to re-parse what the pattern just matched.
+#:
+#: This exists because a shape check alone is not a validity check. `\d{1,3}`
+#: accepts `999.1.1.1` and `10.1.12.256`; both were then reported as a failed
+#: OSPF adjacency on a backbone that was healthy, which escalated through
+#: `synthesize_health` to `status=unhealthy`. A mistyped octet is a refusal, not
+#: a network fault.
+_IPV4 = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}"
+
+
+#: Per-argument range checks that a regex cannot express, keyed by field.
+#:
+#: Each takes the already shape-validated text and returns an error message, or
+#: `None` when the value is in range. Kept separate from `ARGUMENT_PATTERNS`
+#: because a pattern answers "is this shaped like an address" and this answers
+#: "is this a possible address" - different questions, and only the first was
+#: being asked.
+#:
+#: The bounds are the protocol's, not arbitrary: a prefix length is 0-32 for
+#: IPv4, and a 4-byte ASN tops out at 2^32 - 1.
+def _mask_in_range(text: str) -> str | None:
+    mask = int(text.rsplit("/", 1)[1])
+    if mask > 32:
+        return f"an IPv4 prefix length is 0-32, not {mask}"
+    return None
+
+
+def _as_in_range(text: str) -> str | None:
+    value = int(text)
+    if value > 4294967295:
+        return f"a 4-byte ASN is at most 4294967295, not {value}"
+    return None
+
+
+ARGUMENT_RANGES: dict[str, Any] = {
+    "prefix": _mask_in_range,
+    "remote_as": _as_in_range,
+}
+
+
 def _verb_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
     """Compile `MUTATING_VERBS` into word-boundary matchers.
 
@@ -119,14 +161,19 @@ ARGUMENT_PATTERNS: dict[str, re.Pattern[str]] = {
     # irb0, xe-0/0/0. Letters, digits, and a few separators - no whitespace, no
     # newlines, no quotes.
     "interface": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$"),
-    # A dotted-quad router ID or loopback.
-    "neighbor_router_id": re.compile(r"^\d{1,3}(\.\d{1,3}){3}$"),
-    "peer_ip": re.compile(r"^\d{1,3}(\.\d{1,3}){3}$"),
+    # A dotted-quad router ID or loopback. Octets are range-checked, not merely
+    # counted: `\d{1,3}` alone accepts `999.1.1.1` and `10.1.12.256`, and an
+    # impossible address produced a confident `fail` on a healthy backbone.
+    "neighbor_router_id": re.compile(rf"^{_IPV4}$"),
+    "peer_ip": re.compile(rf"^{_IPV4}$"),
     # A 32-bit ASN in either plain or 4-byte notation, or the reserved ASN.
+    # The digit count is a shape check only; the range is enforced by
+    # `ARGUMENT_RANGES` below.
     "remote_as": re.compile(r"^(?:0|65535|[1-9]\d{0,9})$"),
     # IPv4 CIDR. Rejects IPv6 and anything with trailing text, which is what
-    # would otherwise smuggle a newline into the reason string.
-    "prefix": re.compile(r"^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$"),
+    # would otherwise smuggle a newline into the reason string. The mask is
+    # range-checked separately: `\d{1,2}` accepts `/33` and `/99`.
+    "prefix": re.compile(rf"^{_IPV4}/\d{{1,2}}$"),
 }
 
 

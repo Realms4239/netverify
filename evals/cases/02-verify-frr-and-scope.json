@@ -71,6 +71,38 @@
       "expect_error_contains": "requires argument"
     },
     {
+      "name": "a prefix length above 32 is refused, not treated as a missing route",
+      "kind": "verify",
+      "command": "srl_route_detail",
+      "arguments": { "prefix": "10.0.0.2/33" },
+      "output_ref": "SRL_ROUTE_INSTALLED",
+      "expect_error_contains": "out of range"
+    },
+    {
+      "name": "an ASN above the 32-bit maximum is refused",
+      "kind": "verify",
+      "command": "srl_bgp_neighbor_detail",
+      "arguments": { "peer_ip": "10.1.13.2", "remote_as": "4294967296" },
+      "output_ref": "SRL_BGP_ESTABLISHED",
+      "expect_error_contains": "out of range"
+    },
+    {
+      "name": "an octet above 255 is refused",
+      "kind": "verify",
+      "command": "srl_ospf_neighbor",
+      "arguments": { "neighbor_router_id": "10.1.12.256" },
+      "output_ref": "SRL_OSPF_FULL",
+      "expect_error_contains": "not a valid"
+    },
+    {
+      "name": "a valid boundary prefix is still accepted",
+      "kind": "verify",
+      "command": "srl_route_detail",
+      "arguments": { "prefix": "0.0.0.0/0" },
+      "output_ref": "SRL_ROUTE_INSTALLED",
+      "expect_error_contains": "no route row"
+    },
+    {
       "name": "an argument invalid for the chosen command is refused, not dropped",
       "kind": "verify",
       "command": "srl_interface_brief",

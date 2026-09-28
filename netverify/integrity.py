@@ -28,7 +28,7 @@ from typing import Any
 
 from . import telemetry
 from .limits import DEFAULT_DEADLINE_SECONDS
-from .registry import ARGUMENT_PATTERNS, COMMANDS, MUTATING_VERBS
+from .registry import ARGUMENT_PATTERNS, ARGUMENT_RANGES, COMMANDS, MUTATING_VERBS
 from .sanitize import _INJECTION_PATTERNS, _SECRET_PATTERNS, MAX_BYTES
 from .scope import validate
 from .verify import MAX_BATCH_ITEMS, MAX_TOTAL_INPUT_BYTES
@@ -210,7 +210,16 @@ def self_check() -> dict[str, Any]:
             "count": len(COMMANDS),
             "ids": [spec.id for spec in COMMANDS],
             "platforms": sorted({spec.platform for spec in COMMANDS}),
+            # Reported as two lists because they answer two different questions,
+            # and only the first was answered before. A caller that saw
+            # `arguments_typed` and nothing else would reasonably conclude every
+            # argument is fully validated, which was not true: an out-of-range
+            # prefix length passed the pattern and produced a confident `fail` on
+            # a healthy backbone. `arguments_ranged` names the fields with an
+            # additional numeric bound, so the gap is visible in the self-report
+            # rather than only in the source.
             "arguments_typed": sorted(ARGUMENT_PATTERNS),
+            "arguments_ranged": sorted(ARGUMENT_RANGES),
         },
         "detection": {
             "secret_patterns": secret_kinds,

@@ -99,15 +99,22 @@ MUTATIONS: list[tuple[str, str, str, str, bool]] = [
     ),
     (
         "netverify/scope.py",
-        '    if any(ch in text for ch in "\\r\\n\\t"):',
+        # Matches the check as it stands, which tests the *raw* value rather than
+        # the stripped one. That rename was the fix for a leading tab being
+        # silently stripped and accepted, so an anchor written against the old
+        # stripped form no longer exists and the mutation reports as stale
+        # rather than testing anything.
+        '    if any(ch in value for ch in "\\r\\n\\t"):',
         "    if False:  # MUTANT: allow control characters",
         "control-character defence in depth is removed",
-        # Tolerated on purpose. The argument patterns already reject any value
-        # carrying an interior newline, so a forged line cannot be produced
-        # today - which is exactly why no test can distinguish this mutant from
-        # correct behaviour. The explicit check is kept as defence in depth for a
-        # future argument type with no pattern, where it would be the only guard.
-        True,
+        # Now caught, and the reason is worth recording. It was previously
+        # tolerated on the grounds that the argument patterns already reject any
+        # value carrying an interior newline, so no test could distinguish the
+        # mutant from correct behaviour. That is no longer true, because the
+        # check now runs before `strip()`: a *leading* tab is not an interior
+        # newline, so it passed the patterns and reached the verdict. The
+        # mutant is caught by the tab regression test.
+        False,
     ),
 ]
 

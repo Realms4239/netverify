@@ -35,30 +35,68 @@ __all__ = ["ScopeError", "validate", "MAX_BYTES"]
 def _require_text(value: Any, field: str) -> str:
     """Coerce a field to text, rejecting the types an agent should not send.
 
-    Also enforces the argument's declared shape. Whitespace, newlines and
-    quotes are refused because arguments are interpolated into the verdict's
-    `check` and `reasons` fields, so an argument carrying a newline lets a
-    caller forge an extra line into text an agent may read as a separate
-    finding. That is output injection, and secret redaction cannot stop it - a
-    forged line is not a secret.
+    Three checks, in this order, and the order matters.
+
+    1. **Control characters, on the raw value.** Whitespace, newlines and tabs
+       are refused because arguments are interpolated into the verdict's
+       `check` and `reasons` fields, so an argument carrying a newline lets a
+       caller forge an extra line into text an agent may read as a separate
+       finding. That is output injection, and secret redaction cannot stop it -
+       a forged line is not a secret.
+
+       Checked *before* stripping. Checking after meant a leading tab was
+       removed by `strip()` and then accepted, while the rule printed right
+       above said tabs were refused. No forged output resulted, because the
+       stripped value is what gets quoted - but a control that documents one
+       behaviour and implements another is exactly the defect class this project
+       keeps finding. Plain spaces are still trimmed, because trailing
+       whitespace in a JSON argument is a formatting habit, not an attack.
+
+    2. **Shape**, via the registry's pattern: is this an address, an interface,
+       a prefix?
+
+    3. **Range**, via the registry's range check: is this a *possible* address?
+       A shape check alone is not a validity check - a dotted quad of three
+       digits per octet accepts `999.1.1.1`, and a two-digit mask accepts
+       `/33` - and an impossible value used to be reported as a failed adjacency
+       on a healthy backbone.
+
+    Refusals name the rule they broke, because an agent that gets a precise
+    reason can correct itself, while one that gets a generic error retries
+    blindly.
     """
     if not isinstance(value, str):
         raise ScopeError(f"{field} must be a string, got {type(value).__name__}")
-    text = value.strip()
-    if not text:
-        raise ScopeError(f"{field} must not be empty")
-    if any(ch in text for ch in "\r\n\t"):
+
+    # Before strip(), deliberately: see the docstring.
+    if any(ch in value for ch in "\r\n\t"):
         raise ScopeError(
             f"{field} must not contain line breaks or tabs; it is quoted back in "
             f"the verdict, so a newline would forge a new line of output. Got: "
-            f"{text[:40]!r}"
+            f"{value[:40]!r}"
         )
+
+    text = value.strip()
+    if not text:
+        raise ScopeError(f"{field} must not be empty")
+
     pattern = registry.ARGUMENT_PATTERNS.get(field)
     if pattern is not None and not pattern.match(text):
         raise ScopeError(
             f"{field}={text!r} is not a valid {field.replace('_', ' ')}. "
             f"Expected something matching {pattern.pattern}."
         )
+
+    # Only reached once the shape is right, so these can parse without guarding.
+    in_range = registry.ARGUMENT_RANGES.get(field)
+    if in_range is not None:
+        problem = in_range(text)
+        if problem is not None:
+            raise ScopeError(
+                f"{field}={text!r} is out of range: {problem}. "
+                f"This is a bad argument, not a network fault - it has not been "
+                f"checked against the device."
+            )
     return text
 
 

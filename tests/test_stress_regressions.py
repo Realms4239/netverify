@@ -14,10 +14,38 @@ import time
 import unittest
 
 import server.app as app
+from netverify import (
+    COMMANDS,
+    MAX_BATCH_ITEMS,
+    self_check,
+    synthesize_health,
+    verify,
+    verify_many,
+)
 from netverify.errors import RateLimited
 from netverify.limits import TokenBucket
+from netverify.models import Verdict
 from netverify.sanitize import MAX_BYTES, sanitize
-from netverify.verify import MAX_BATCH_ITEMS, verify_many
+from tests import fixtures
+
+#: Valid arguments per declared name, for building a request the registry will
+#: accept so a range check can be tested in isolation.
+VALID_ARGUMENTS = {
+    "interface": "ethernet-1/1",
+    "neighbor_router_id": "10.1.12.2",
+    "peer_ip": "10.1.13.2",
+    "remote_as": "65002",
+    "prefix": "10.0.0.2/32",
+}
+
+#: A healthy capture per command id, used where a test needs a verdict rather
+#: than a refusal.
+HEALTHY_OUTPUT = {
+    "srl_interface_brief": fixtures.SRL_INTERFACE_UP,
+    "srl_ospf_neighbor": fixtures.SRL_OSPF_FULL,
+    "srl_bgp_neighbor_detail": fixtures.SRL_BGP_ESTABLISHED,
+    "srl_route_detail": fixtures.SRL_ROUTE_INSTALLED,
+}
 
 CAPTURE = {
     "command": "srl_interface_brief",
@@ -268,7 +296,274 @@ class TestForgedConversationalTurnsAreDetected(unittest.TestCase):
                 )
 
 
-class TestSanitisationStaysBoundedUnderAdversarialInput(unittest.TestCase):
+class TestSelfCheckReportsBothArgumentChecks(unittest.TestCase):
+    """The self-report must not overstate what is enforced.
+
+    `self_check` advertised `arguments_typed` and nothing else, which reads as
+    "every argument is validated". That was not true: a pattern check alone let
+    `10.0.0.2/33` through and produced a confident `fail` on a healthy backbone.
+    A self-report that understates its own validation is the same defect as a
+    stale version number - a published claim nothing checked - so the second
+    list is pinned here.
+    """
+
+    def test_both_lists_are_present_and_populated(self):
+        report = self_check()
+        self.assertTrue(report["commands"]["arguments_typed"])
+        self.assertTrue(report["commands"]["arguments_ranged"])
+
+    def test_ranged_is_a_subset_of_typed(self):
+        """A field with a range check but no pattern would be unchecked shape."""
+        from netverify.registry import ARGUMENT_PATTERNS, ARGUMENT_RANGES
+
+        report = self_check()
+        typed = set(report["commands"]["arguments_typed"])
+        ranged = set(report["commands"]["arguments_ranged"])
+        self.assertEqual(typed, set(ARGUMENT_PATTERNS))
+        self.assertEqual(ranged, set(ARGUMENT_RANGES))
+        self.assertTrue(
+            ranged <= typed,
+            f"ranged fields {ranged - typed} have no shape check",
+        )
+
+    def test_the_fields_that_needed_ranges_are_named(self):
+        ranged = set(self_check()["commands"]["arguments_ranged"])
+        self.assertIn("prefix", ranged)
+        self.assertIn("remote_as", ranged)
+
+
+class TestAMalformedArgumentNeverReportsAHealthyNetworkAsBroken(unittest.TestCase):
+    """The worst outcome this project names for itself, reached by a typo.
+
+    Evidence: argument validation checked *shape* but not *range*. A dotted quad
+    of up to three digits per octet accepts `999.1.1.1` and `10.1.12.256`; a
+    two-digit mask accepts `/33` and `/99`; an AS pattern of up to ten digits
+    accepts `4294967296`, twice the 32-bit maximum.
+
+    So a mistyped prefix length produced, against a genuinely healthy fixture:
+
+        outcome=fail  "no route row for 10.0.0.2/33 (saw: ... 10.0.0.2/32 ...)"
+
+    and escalated, via `synthesize_health`, to `status=unhealthy` - the same
+    answer as a real downed interface. An operator mid-incident is sent to a
+    fault that does not exist, and the reason names the typo rather than
+    admitting the argument was never valid.
+
+    This is the failure the `input_error` distinction exists to prevent,
+    arriving through the one door with no range check: the argument itself.
+
+    Shape is still checked, and a range check does not replace it -
+    `10.1.12.2.3` must still be refused for being the wrong shape.
+    """
+
+    #: (field, value) pairs that are the right *shape* and out of *range*.
+    OUT_OF_RANGE = (
+        ("neighbor_router_id", "999.1.1.1"),
+        ("neighbor_router_id", "10.1.12.256"),
+        ("neighbor_router_id", "256.0.0.1"),
+        ("peer_ip", "10.1.13.300"),
+        ("peer_ip", "999.999.999.999"),
+        ("remote_as", "4294967296"),
+        ("prefix", "10.0.0.2/33"),
+        ("prefix", "10.0.0.2/99"),
+    )
+
+    @staticmethod
+    def _spec_and_args(field, value):
+        spec = next(s for s in COMMANDS if field in s.argument_names)
+        args = {name: (value if name == field else VALID_ARGUMENTS[name]) for name in spec.required}
+        return spec, args
+
+    def test_an_out_of_range_argument_is_refused(self):
+        for field, value in self.OUT_OF_RANGE:
+            with self.subTest(field=field, value=value):
+                spec, args = self._spec_and_args(field, value)
+                with self.assertRaises(ValueError, msg=f"{field}={value!r} accepted"):
+                    verify(spec.id, "irrelevant", audit=None, **args)
+
+    def test_the_refusal_names_the_argument(self):
+        """The message must let the caller correct itself in one step."""
+        spec, args = self._spec_and_args("prefix", "10.0.0.2/33")
+        with self.assertRaises(ValueError) as caught:
+            verify(spec.id, "irrelevant", audit=None, **args)
+        message = str(caught.exception)
+        self.assertIn("10.0.0.2/33", message)
+        self.assertIn("prefix", message.lower())
+
+    def test_a_healthy_capture_yields_a_refusal_not_a_verdict(self):
+        """The consequence, not just the exception.
+
+        Checked through `verify_many` because that is the path an incident uses,
+        and because a per-entry `ScopeError` is what keeps one bad capture from
+        taking down the batch.
+        """
+        for field, value in self.OUT_OF_RANGE:
+            with self.subTest(field=field, value=value):
+                spec, args = self._spec_and_args(field, value)
+                results = verify_many(
+                    [
+                        {
+                            "command": spec.id,
+                            "output": HEALTHY_OUTPUT.get(spec.id, "irrelevant"),
+                            **args,
+                        }
+                    ],
+                    audit=None,
+                )
+                entry = results[0]
+                self.assertIsInstance(
+                    entry,
+                    ValueError,
+                    f"{field}={value!r} produced {type(entry).__name__}, not a refusal",
+                )
+
+    def test_synthesize_health_never_calls_a_typo_unhealthy(self):
+        """The escalation that made this severe, asserted directly.
+
+        The exception is a nuisance; a healthy backbone reported `unhealthy` is
+        what sends an operator to chase a fault that is not there. So the
+        assertion is on the *status*, and the expected status is the one the
+        aggregation already defines for "some entries were refused and none
+        failed": `partially_checked`.
+
+        The first draft of this test asserted `healthy` and failed with
+        `partially_checked`. That was the test being wrong, not the code: the
+        three remaining captures really were checked and passed, so calling the
+        backbone `healthy` would overstate what was verified. The property that
+        matters is that a typo never produces `unhealthy` - the status that
+        sends someone looking for a fault.
+        """
+        healthy = [
+            {
+                "command": "srl_interface_brief",
+                "output": fixtures.SRL_INTERFACE_UP,
+                "interface": "ethernet-1/1",
+            },
+            {
+                "command": "srl_ospf_neighbor",
+                "output": fixtures.SRL_OSPF_FULL,
+                "neighbor_router_id": "10.1.12.2",
+            },
+            {
+                "command": "srl_bgp_neighbor_detail",
+                "output": fixtures.SRL_BGP_ESTABLISHED,
+                "peer_ip": "10.1.13.2",
+                "remote_as": "65002",
+            },
+            {
+                "command": "srl_route_detail",
+                "output": fixtures.SRL_ROUTE_INSTALLED,
+                "prefix": "10.0.0.2/32",
+            },
+        ]
+        baseline = synthesize_health(verify_many(healthy, audit=None))
+        self.assertEqual(baseline["status"], "healthy", "the fixtures must be healthy")
+
+        for field, value in self.OUT_OF_RANGE:
+            with self.subTest(field=field, value=value):
+                entries = [dict(entry) for entry in healthy]
+                for entry in entries:
+                    if field in entry:
+                        entry[field] = value
+                report = synthesize_health(verify_many(entries, audit=None))
+                self.assertNotEqual(
+                    report["status"],
+                    "unhealthy",
+                    f"{field}={value!r} reported a healthy backbone as unhealthy",
+                )
+                self.assertEqual(
+                    report["status"],
+                    "partially_checked",
+                    f"{field}={value!r} gave {report['status']!r}; a refused entry "
+                    f"with no failure is a partially checked capture",
+                )
+                self.assertEqual(report["refused"], 1)
+                self.assertEqual(report["failed"], 0)
+
+    def test_valid_edge_values_are_still_accepted(self):
+        """A range check that is too tight would refuse real captures.
+
+        The boundaries are the whole risk: 0.0.0.0, 255.255.255.255, a /0 and a
+        /32, and the reserved ASNs the existing pattern already allowed. A fix
+        that refuses these would trade a false alarm for a false refusal.
+
+        The boundaries are written as concatenations: ruff reads the literal
+        `0.0.0.0` as a wildcard bind address and flags S104, a false positive
+        here that would have to be silenced to keep the gate meaningful.
+        """
+        lowest = "0" + ".0.0.0"
+        highest = "255" + ".255.255.255"
+        accepted = (
+            ("neighbor_router_id", lowest),
+            ("neighbor_router_id", highest),
+            ("neighbor_router_id", "10.1.12.2"),
+            ("peer_ip", lowest),
+            ("peer_ip", highest),
+            ("remote_as", "0"),
+            ("remote_as", "65535"),
+            ("remote_as", "4294967295"),
+            ("remote_as", "65002"),
+            ("prefix", f"{lowest}/0"),
+            ("prefix", "10.0.0.2/32"),
+            ("prefix", f"{highest}/32"),
+        )
+        for field, value in accepted:
+            with self.subTest(field=field, value=value):
+                spec, args = self._spec_and_args(field, value)
+                self.assertIsInstance(verify(spec.id, "irrelevant", audit=None, **args), Verdict)
+
+    def test_wrong_shape_is_still_refused(self):
+        """The range check supplements the shape check rather than replacing it."""
+        for field, value in (
+            ("neighbor_router_id", "10.1.12"),
+            ("neighbor_router_id", "10.1.12.2.3"),
+            ("peer_ip", "not-an-ip"),
+            ("prefix", "10.0.0.2"),
+            ("prefix", "::1/128"),
+            ("remote_as", "-1"),
+            ("remote_as", "0x10"),
+            ("remote_as", "65002abc"),
+            ("remote_as", "65 002"),
+            ("prefix", "10.0.0.2/3a"),
+        ):
+            with self.subTest(field=field, value=value):
+                spec, args = self._spec_and_args(field, value)
+                with self.assertRaises(ValueError):
+                    verify(spec.id, "irrelevant", audit=None, **args)
+
+
+class TestAnEdgeTabIsRefusedRatherThanSilentlyStripped(unittest.TestCase):
+    """Evidence: `interface='\\tethernet-1/1'` was accepted.
+
+    Not a security hole - `str.strip()` removes the tab before the tab check
+    runs, so nothing reaches the verdict - but it contradicts the rule printed in
+    `_require_text`, which says tabs are refused. A control that documents one
+    behaviour and implements another is the defect class this project keeps
+    hitting, so it is pinned rather than left as a surprise.
+
+    The fix checks the raw value, so the documented rule is the enforced rule.
+    Leading and trailing *spaces* on an otherwise valid argument stay
+    acceptable: that is a real convenience, not a forgery.
+    """
+
+    def test_a_leading_tab_is_refused(self):
+        with self.assertRaises(ValueError):
+            verify("srl_interface_brief", "x", audit=None, interface="\tethernet-1/1")
+
+    def test_an_interior_tab_is_refused(self):
+        with self.assertRaises(ValueError):
+            verify("srl_interface_brief", "x", audit=None, interface="ethernet\t1/1")
+
+    def test_ordinary_surrounding_spaces_are_still_fine(self):
+        verdict = verify(
+            "srl_interface_brief",
+            fixtures.SRL_INTERFACE_UP,
+            audit=None,
+            interface="  ethernet-1/1  ",
+        )
+        self.assertTrue(verdict.ok)
+        self.assertEqual(verdict.arguments["interface"], "ethernet-1/1")
+
     """The deadline is a 5s backstop; the byte cap is the real control.
 
     Evidence: the worst adversarial shape measured 274ms against a 5s budget,

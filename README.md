@@ -73,6 +73,13 @@ evidence of a healthy network. `compare_captures` keys on the command *and* its
 arguments, so a capture that stops covering an interface is reported as removed
 rather than silently "unchanged".
 
+A mistyped argument is refused, not answered. `10.0.0.2/33` is not a prefix, and
+`10.1.12.256` is not an address, so both are rejected before anything is checked
+against the device — the alternative is a confident `fail` about a network that
+was healthy, which escalated through `synthesize_health` to `unhealthy`. Shape
+and range are both checked, because a pattern that accepts three digits per
+octet accepts `999.1.1.1` just as readily as `10.1.12.2`.
+
 `self_check` is the one worth knowing about: it reports the registered commands,
 the detection patterns, the limits, the pinned upstream commit and a hash of the
 vendored parser — and then *demonstrates* its guards by re-checking that a
@@ -217,7 +224,7 @@ SDK derives the input schema from it and a catch-all becomes a required
 
 ## The eval gate
 
-`evals/` is 42 declarative cases across four kinds — verify, sanitize, scan,
+`evals/` is 46 declarative cases across four kinds — verify, sanitize, scan,
 batch. **Model-free**: fixed inputs, fixed expected results, no API key, no
 network. That is the point. A gate that needs a paid model to be green is a gate
 that gets skipped, and a skipped gate is indistinguishable from no gate.
@@ -279,7 +286,7 @@ rather than letting them harden into false confidence:
 
 ```sh
 python -m unittest discover -s tests -t .   # 122 tests, stdlib only
-python evals/run_evals.py                   # 42 eval cases
+python evals/run_evals.py                   # 46 eval cases
 python scripts/smoke_test.py                # MCP round trip, in-memory
 python scripts/stdio_check.py               # real process, real pipe
 python scripts/mutation_test.py             # proves the suite has teeth
