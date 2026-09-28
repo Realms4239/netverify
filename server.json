@@ -6,14 +6,14 @@
     "url": "https://github.com/Realms4239/netverify",
     "source": "github"
   },
-  "version": "1.0.0",
+  "version": "1.2.0",
   "websiteUrl": "https://github.com/Realms4239/netverify#readme",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "netverify",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "transport": { "type": "stdio" }
     }
   ]

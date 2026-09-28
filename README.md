@@ -217,7 +217,7 @@ SDK derives the input schema from it and a catch-all becomes a required
 
 ## The eval gate
 
-`evals/` is 35 declarative cases across four kinds — verify, sanitize, scan,
+`evals/` is 38 declarative cases across four kinds — verify, sanitize, scan,
 batch. **Model-free**: fixed inputs, fixed expected results, no API key, no
 network. That is the point. A gate that needs a paid model to be green is a gate
 that gets skipped, and a skipped gate is indistinguishable from no gate.

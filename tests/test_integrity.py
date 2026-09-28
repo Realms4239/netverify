@@ -12,8 +12,10 @@ computed at runtime actually are, because a claim that cannot fail is a caption
 rather than a control.
 """
 
+import asyncio
 import json
 import pathlib
+import re
 import unittest
 
 import netverify
@@ -67,28 +69,127 @@ class TestDuplicationCannotDrift(unittest.TestCase):
 
         self.assertEqual(SERVER_VERSION, INTEGRITY_VERSION)
 
+    def test_the_registry_manifest_declares_the_same_version(self):
+        """`server.json` is what an MCP registry reads to list this server, so a
+        stale version there is the one a user sees before installing anything.
+
+        This was 1.0.0 against a library at 1.2.0, and the tree-walk below missed
+        it because it only ever looked at `*.py`. The manifest is a *published*
+        version claim, so it is pinned here by name as well as by the sweep.
+        """
+        manifest = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["version"], INTEGRITY_VERSION)
+        for package in manifest["packages"]:
+            with self.subTest(package=package["identifier"]):
+                self.assertEqual(package["version"], INTEGRITY_VERSION)
+
     def test_no_other_version_string_in_the_tree_disagrees(self):
         """Belt and braces over the whole tree.
 
         Pinning each copy individually is how a *new* copy gets added and
-        forgotten. This walks the Python sources and fails on any project
-        version declaration that is not the agreed one, so a new copy has to be
-        accounted for rather than quietly drifting.
+        forgotten. This walks the project and fails on any version declaration
+        that is not the agreed one, so a new copy has to be accounted for rather
+        than quietly drifting.
+
+        Deliberately not Python-only. The original sweep globbed `*.py`, which
+        meant `server.json` - a real, user-facing version claim - was invisible
+        to it. Any file that declares a version in the project's own style is
+        now in scope, and a file that looks like a declaration but disagrees is
+        reported by path so the fix is obvious.
         """
         disagreeing: list[str] = []
-        for path in sorted(ROOT.rglob("*.py")):
-            if "__pycache__" in path.parts or ".git" in path.parts:
+        for path in sorted(ROOT.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts or ".git" in path.parts:
+                continue
+            if path.suffix not in {".py", ".json", ".toml"}:
                 continue
             for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 stripped = line.strip()
-                if not stripped.startswith(("__version__ =", "SERVER_VERSION =")):
+                if path.suffix == ".py":
+                    if not stripped.startswith(("__version__ =", "SERVER_VERSION =")):
+                        continue
+                elif path.suffix == ".json":
+                    # The manifest declares the server version twice - once at the
+                    # top, once per package - and the registry reads both.
+                    if '"version"' not in stripped:
+                        continue
+                elif not stripped.startswith("version"):
                     continue
-                if '"' not in stripped:
+                # Extract the value with a regex per format, rather than by
+                # splitting on quotes and guessing which run is the value. JSON
+                # is `"version": "1.2.0",` - the value is whatever follows the
+                # colon, and a trailing comma means it is not simply the last
+                # quoted run. Python and TOML are `version = "1.2.0"`, where the
+                # value is the first quoted run. Guessing produced the key, then
+                # a comma, before this got it right.
+                pattern = r':\s*"([^"]+)"' if path.suffix == ".json" else r'"([^"]+)"'
+                found = re.search(pattern, stripped)
+                if not found:
                     continue
-                value = stripped.split('"')[1]
+                value = found.group(1)
                 if value != INTEGRITY_VERSION:
                     disagreeing.append(f"{path.relative_to(ROOT)}: {value}")
         self.assertEqual(disagreeing, [], f"version drift: {disagreeing}")
+
+
+class TestTheReadmeDoesNotDrift(unittest.TestCase):
+    """The README is the first thing anyone reads, and it states numbers.
+
+    The same defect as a stale version string, in the place with the most
+    readers: `server.json` said 1.0.0 against a library at 1.2.0, and the README
+    said "35 declarative cases" in one place and "38" in another while the real
+    number was 38. A number nobody checks is a number that is wrong by the time
+    anyone relies on it.
+    """
+
+    def setUp(self):
+        self.readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    def test_the_eval_case_count_is_accurate_and_stated_once(self):
+        """Counts the cases on disk, and requires the README to agree.
+
+        Also fails on the README contradicting *itself*, which is how the 35/38
+        split survived: both numbers were plausible and nothing compared them.
+        """
+        total = 0
+        for case in sorted((ROOT / "evals" / "cases").glob("*.json")):
+            data = json.loads(case.read_text(encoding="utf-8"))
+            total += len(data if isinstance(data, list) else data.get("cases", []))
+        self.assertEqual(
+            [n for n in re.findall(r"\b(\d+) declarative cases\b", self.readme)],
+            [str(total)],
+            f"the README must state {total} eval cases, exactly once",
+        )
+
+    def test_the_injection_family_count_is_accurate(self):
+        """Counted from the injection table only.
+
+        The credential patterns are a separate table doing a different job -
+        redaction, not neutralisation - and an earlier check merged the two and
+        reported twelve families, which would have been a wrong "fix" to a
+        correct README.
+        """
+        source = (ROOT / "netverify" / "sanitize.py").read_text(encoding="utf-8")
+        start = source.index("_INJECTION_PATTERNS:")
+        end = source.index("\n)\n", start)
+        families = set(re.findall(r'"([a-z_]+)",\s*\n?\s*re\.compile', source[start:end]))
+        word = {7: "Seven", 6: "Six", 8: "Eight", 9: "Nine", 10: "Ten"}.get(len(families))
+        self.assertIsNotNone(
+            word, f"the README has no wording for {len(families)} families; update it"
+        )
+        self.assertIn(f"{word} injection families", self.readme)
+
+    def test_the_tool_count_matches_the_server(self):
+        """Seven tools, and the README says so by name and in words."""
+        from server.app import build_server  # noqa: PLC0415
+
+        server = build_server()
+        tools = asyncio.run(server.list_tools())
+        self.assertEqual(len(tools), 7)
+        self.assertIn("The seven tools", self.readme)
+        for tool in tools:
+            with self.subTest(tool=tool.name):
+                self.assertIn(tool.name, self.readme)
 
 
 class TestComputedGuarantees(unittest.TestCase):
