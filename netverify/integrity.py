@@ -31,7 +31,7 @@ from .limits import DEFAULT_DEADLINE_SECONDS
 from .registry import ARGUMENT_PATTERNS, COMMANDS, MUTATING_VERBS
 from .sanitize import _INJECTION_PATTERNS, _SECRET_PATTERNS, MAX_BYTES
 from .scope import validate
-from .verify import MAX_BATCH_ITEMS
+from .verify import MAX_BATCH_ITEMS, MAX_TOTAL_INPUT_BYTES
 
 #: The version string is duplicated here rather than read from the package's
 #: `__init__`. That is not duplication for its own sake: `__init__` imports this
@@ -40,9 +40,90 @@ from .verify import MAX_BATCH_ITEMS
 #: quietly diverge.
 __version__ = "1.2.0"
 
+#: Modules that could open a socket or drive a network device. Their absence
+#: from the package is what makes the "opens no sockets" claim checkable rather
+#: than merely stated, and it is the property that lets netverify run inside a
+#: lab with no route to the management network.
+NETWORK_CAPABLE = frozenset(
+    {
+        "socket",
+        "ssl",
+        "http",
+        "urllib",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "paramiko",
+        "netmiko",
+        "ncclient",
+        "ftplib",
+        "telnetlib",
+        "smtplib",
+        "xmlrpc",
+        "asyncio",
+    }
+)
+
+#: Modules that read credentials or execute other programs. Same reasoning: a
+#: server that imports these is a server that could hold or use a secret.
+CREDENTIAL_CAPABLE = frozenset({"getpass", "pwd", "netrc", "keyring", "subprocess"})
+
+
+#: Non-stdlib modules allowed to appear in the package. The instrumentation
+#: imports these defensively, so their *absence* degrades to a no-op rather than
+#: breaking the import - which is why their presence is not a dependency and the
+#: zero-dependency claim survives them.
+ALLOWED_OPTIONAL = frozenset({"opentelemetry", "opentelemetry_api"})
+
+#: Modules the vendored parser is allowed to import, restated here so
+#: `imported_roots` is not silently widened by the vendor's own imports.
+VENDOR_ALLOWED = frozenset({"json", "re"})
+
+
+def _third_party(roots: set[str]) -> set[str]:
+    """Third-party roots present, excluding the ones that are permitted."""
+    import sys
+
+    stdlib = set(sys.stdlib_module_names)
+    return {
+        r
+        for r in roots
+        if r not in stdlib
+        and r not in ALLOWED_OPTIONAL
+        and r not in VENDOR_ALLOWED
+        and r != "netverify"
+    }
+
+
+def imported_roots() -> set[str]:
+    """Every top-level module imported anywhere in the package, by static scan.
+
+    Static rather than live on purpose: `sys.modules` would report whatever the
+    *host* process happened to have imported, which says more about the host
+    than about netverify. Reading the source answers the question actually being
+    asked.
+    """
+    import ast
+
+    roots: set[str] = set()
+    package = pathlib.Path(__file__).resolve().parent
+    for path in sorted(package.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover - a broken file fails CI anyway
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                roots.add(node.module.split(".")[0])
+    return roots
+
+
 #: Pinned upstream, duplicated here deliberately rather than imported: the parity
-#: script owns the pin, and the test suite asserts the two agree. Importing it
-#: would make that assertion impossible to write.
+#: script owns the pin, and `tests/test_integrity.py` asserts the two agree.
+#: Importing the pin would make that assertion impossible to write, which is
+#: exactly the drift this arrangement is meant to catch.
 PINNED_COMMIT = "71d3398207088ca67a15ddd3132cedfed81bd678"
 UPSTREAM_REPO = "Realms4239/isp-network-as-code"
 UPSTREAM_PATH = "pyats/parsers.py"
@@ -88,19 +169,42 @@ def self_check() -> dict[str, Any]:
         "known_secret_masked": "hunter2" not in sanitize_text("password=hunter2").safe_text,
     }
 
+    roots = imported_roots()
+    network_found = sorted(roots & NETWORK_CAPABLE)
+    credential_found = sorted(roots & CREDENTIAL_CAPABLE)
+    third_party = _third_party(roots)
+
     return {
         "server": {
             "name": "netverify",
             "version": __version__,
             "protocol_revision": "2026-07-28",
         },
+        # Split deliberately. `declared` is what this server says about itself
+        # and is only as good as the design; `verified` is what this function
+        # just checked, in this process, with no network and no trust. They were
+        # one field before, and the result was five literals that no code read -
+        # so a claim could not fail, and a claim that cannot fail is a caption.
         "guarantees": {
-            "read_only": True,
-            "holds_device_credentials": False,
-            "opens_sockets": False,
-            "fetches_device_output": False,
-            "zero_runtime_dependencies": True,
-            "untrusted_text_sanitised": True,
+            "declared": {
+                "read_only": True,
+                "holds_device_credentials": False,
+                "opens_sockets": False,
+                "fetches_device_output": False,
+                "zero_runtime_dependencies": True,
+                "untrusted_text_sanitised": True,
+            },
+            "verified": {
+                "no_network_module_imported": not network_found,
+                "no_credential_module_imported": not credential_found,
+                "no_third_party_module_imported": not third_party,
+                "mutating_command_refused": guards["mutating_command_refused"],
+                "raw_cli_string_refused": guards["raw_cli_string_refused"],
+                "known_secret_masked": guards["known_secret_masked"],
+            },
+            "network_modules_found": network_found,
+            "credential_modules_found": credential_found,
+            "third_party_modules_found": sorted(third_party),
         },
         "commands": {
             "count": len(COMMANDS),
@@ -116,7 +220,17 @@ def self_check() -> dict[str, Any]:
         "limits": {
             "max_output_bytes": MAX_BYTES,
             "max_batch_items": MAX_BATCH_ITEMS,
+            # The byte budget is what actually bounds the work; the item cap
+            # alone let a batch cost five seconds. Both are reported because a
+            # limit a caller cannot see is a limit they cannot plan around.
+            "max_total_input_bytes": MAX_TOTAL_INPUT_BYTES,
             "call_deadline_seconds": DEFAULT_DEADLINE_SECONDS,
+            "call_deadline_enforced": True,
+            "call_deadline_preemptive": False,
+            "call_deadline_note": (
+                "Checked at boundaries; it cannot interrupt a regex pass. The "
+                "byte budget is the control that bounds the work."
+            ),
         },
         "vendored_parser": {
             **vendored_digest(),

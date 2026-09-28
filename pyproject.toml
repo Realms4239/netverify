@@ -1,6 +1,6 @@
 [project]
 name = "netverify"
-version = "1.0.0"
+version = "1.2.0"
 description = "Verify ISP backbone device output safely, with no credentials. Zero-dependency library plus a read-only MCP server."
 readme = "README.md"
 requires-python = ">=3.11"

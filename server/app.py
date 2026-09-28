@@ -59,7 +59,11 @@ from netverify.errors import RateLimited, ScopeError
 from .prompts import register as register_prompts
 
 SERVER_NAME = "netverify"
-SERVER_VERSION = "1.0.0"
+#: Kept equal to `netverify.__version__` and to the `pyproject.toml` version.
+#: `server/app.py` cannot import the library's version at module scope, because
+#: the package `__init__` re-exports names that would shadow the submodule
+#: imports used above. `tests/test_integrity.py` asserts all three agree.
+SERVER_VERSION = "1.2.0"
 
 #: Sustained rate and burst. Generous for an interactive agent, tight enough to
 #: bound the work one runaway loop can cause.
