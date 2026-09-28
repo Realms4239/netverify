@@ -31,6 +31,34 @@
       "expect_absent": ["[untrusted-content:[untrusted-content:"]
     },
     {
+      "name": "a forged assistant turn in a banner is detected",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_FORGED_TURN",
+      "expect_kinds": ["forged_conversation_turn", "first_person_verdict_claim"],
+      "expect_clean": false
+    },
+    {
+      "name": "a forged role tag in a banner is detected",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_FORGED_ROLE_TAG",
+      "expect_kinds": ["forged_conversation_turn"],
+      "expect_clean": false
+    },
+    {
+      "name": "a colon-separated enable password is masked",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_ENABLE_PASSWORD_COLON",
+      "expect_kinds": ["enable_password"],
+      "expect_absent": ["Sup3rS3cret"]
+    },
+    {
+      "name": "a colon-separated snmp community is masked",
+      "kind": "sanitize",
+      "output_ref": "OUTPUT_SNMP_COMMUNITY_COLON",
+      "expect_kinds": ["snmp_community"],
+      "expect_absent": ["s3cr3tcommunity"]
+    },
+    {
       "name": "sanitize bounds the work on an oversize payload",
       "kind": "sanitize",
       "output_ref": "OUTPUT_OVERSIZE",

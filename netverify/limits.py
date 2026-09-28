@@ -70,11 +70,28 @@ class TokenBucket:
         """Take `cost` tokens or raise `RateLimited`.
 
         The refusal states the wait, so a client can back off precisely rather
-        than guessing.
+        than guessing - but only when a wait can actually help.
+
+        A cost larger than `capacity` is different in kind. The balance is
+        clamped to `capacity` by `_refill`, so such a deficit never closes: no
+        amount of waiting makes the call succeed. The original message said
+        "Retry in 0.10s" for a cost of 31 against a capacity of 30, which is
+        arithmetic that cannot come true. Telling a caller to retry an
+        impossible request is how a rate limiter becomes an infinite retry loop,
+        which is the failure this class exists to prevent. So the two cases get
+        different messages: a wait when waiting helps, and an instruction to
+        split the request when it does not.
         """
         if self.try_consume(cost):
             return
         self._refill()
+        if cost > self.capacity:
+            raise RateLimited(
+                f"request costs {cost:g} tokens, above the maximum burst of "
+                f"{self.capacity}. No amount of waiting will serve it, because "
+                f"the budget is capped at {self.capacity}. Split it into "
+                f"several smaller calls."
+            )
         deficit = cost - self._tokens
         wait = max(0.0, deficit / self.refill_per_second)
         raise RateLimited(

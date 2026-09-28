@@ -162,18 +162,45 @@ class TestTheReadmeDoesNotDrift(unittest.TestCase):
         )
 
     def test_the_injection_family_count_is_accurate(self):
-        """Counted from the injection table only.
+        """Counted from the module's own table, not by scraping the source.
 
-        The credential patterns are a separate table doing a different job -
-        redaction, not neutralisation - and an earlier check merged the two and
-        reported twelve families, which would have been a wrong "fix" to a
-        correct README.
+        Two earlier attempts at this failed in instructive ways, and both
+        failures were the guard doing its job - a number nobody computes is a
+        number that is wrong.
+
+        The first scraped the file with a regex requiring `re.compile` on the
+        line after the name. Every pattern in the table is formatted that way, so
+        it looked right - and it silently skipped the two entries whose `re.compile`
+        call is preceded by a long comment block. It reported 8 when the table
+        held 9, and the honest response to "the README says Nine but the code
+        says Eight" is to check the code, not the prose.
+
+        The second counted both pattern tables together, reporting 12 "injection
+        families" when the README's original seven was correct: credentials are
+        redacted, injections are neutralised, and counting them as one number
+        would have had a correct README "fixed" to a wrong one.
+
+        So this reads the compiled patterns, which is the only source that cannot
+        drift from what actually runs.
         """
-        source = (ROOT / "netverify" / "sanitize.py").read_text(encoding="utf-8")
-        start = source.index("_INJECTION_PATTERNS:")
-        end = source.index("\n)\n", start)
-        families = set(re.findall(r'"([a-z_]+)",\s*\n?\s*re\.compile', source[start:end]))
-        word = {7: "Seven", 6: "Six", 8: "Eight", 9: "Nine", 10: "Ten"}.get(len(families))
+        import importlib
+
+        module = importlib.import_module("netverify.sanitize")
+        families = [name for name, _ in module._INJECTION_PATTERNS]
+        self.assertEqual(
+            len(families),
+            len(set(families)),
+            "duplicate family name in the injection table",
+        )
+        word = {
+            6: "Six",
+            7: "Seven",
+            8: "Eight",
+            9: "Nine",
+            10: "Ten",
+            11: "Eleven",
+            12: "Twelve",
+        }.get(len(families))
         self.assertIsNotNone(
             word, f"the README has no wording for {len(families)} families; update it"
         )

@@ -68,7 +68,25 @@ SERVER_VERSION = "1.2.0"
 
 #: Sustained rate and burst. Generous for an interactive agent, tight enough to
 #: bound the work one runaway loop can cause.
-BUCKET_CAPACITY = 30
+#:
+#: The burst is *derived*, not chosen, and this is the second time that has
+#: mattered. A batch is charged one token per item and `compare_captures` charges
+#: both sides, so the largest request the server accepts costs `2 *
+#: MAX_BATCH_ITEMS`. A hand-picked burst of 30 was below that, and because the
+#: balance is clamped to the burst, every batch over 30 items was refused
+#: permanently: 31 items, 200 items, and two full 200-item sides all failed with
+#: "Retry in 0.10s", a wait that can never elapse. The documented limit was
+#: unreachable.
+#:
+#: Deriving it makes that class of bug impossible to reintroduce by editing one
+#: number: raise `MAX_BATCH_ITEMS` and the burst follows.
+#:
+#: Note what the burst is and is not. It is *not* the work bound - the byte
+#: budget in `verify_many` and the call deadline are, and a single 400-item
+#: batch is still capped at `MAX_TOTAL_INPUT_BYTES` and refused past the
+#: deadline. The burst governs how much a caller may do at once; the sustained
+#: refill is what punishes a loop, and at 10 tokens/second that is unchanged.
+BUCKET_CAPACITY = 2 * MAX_BATCH_ITEMS
 BUCKET_REFILL_PER_SECOND = 10.0
 
 BUCKET = TokenBucket(BUCKET_CAPACITY, BUCKET_REFILL_PER_SECOND)
