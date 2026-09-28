@@ -96,9 +96,17 @@ class TestPromptIsNotAControl(unittest.TestCase):
     """
 
     def test_prompt_does_not_restate_the_allowlist_as_a_rule(self):
-        """It names the ids, but must not claim to be the thing that admits them."""
+        """It names the ids, but must not claim to be the thing that admits them.
+
+        Asserted as the two halves the sentence needs - *rules live in code*, and
+        *this document is not them* - rather than as one literal. The wording lives
+        in SKILL.md now, and a test pinned to an exact phrase would fail on a
+        reword rather than on a real change of meaning.
+        """
         text = triage_capture()
-        self.assertIn("enforced in code", text)
+        self.assertIn("enforced", text)
+        self.assertIn("in the server's code", text)
+        self.assertIn("not by this document", text)
 
     def test_prompt_does_not_assert_a_credential_free_server_as_itself_being_one(self):
         """The guarantee belongs to the server and the contract resource; the

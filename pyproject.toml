@@ -47,6 +47,13 @@ build-backend = "setuptools.build_meta"
 # and not require a git checkout.
 packages = ["netverify", "netverify.parsers", "server"]
 
+[tool.setuptools.package-data]
+# The skills are data, not code, and a wheel that omits them produces a server
+# that starts and then serves an empty catalogue - which reads as the feature
+# being broken rather than the packaging. `load_skills` treats a missing
+# directory as empty so the server still runs; this is what keeps it non-empty.
+server = ["../skills/**/*.md"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

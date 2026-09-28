@@ -34,10 +34,16 @@ TOOL_NAMES = {
 #: deliberately absent: `resources/list` never includes templates, so asserting
 #: it there would be asserting something about the SDK rather than about this
 #: server.
+#:
+#: The skill URI belongs here for the same reason the prompt name does: SEP-2640
+#: serves skills as ordinary resources, so a host reaches the triage workflow at
+#: `skill://triage-backbone/SKILL.md`. Removing it would be a breaking change to
+#: any client that fetched it directly rather than going through `skills/get`.
 RESOURCE_URIS = {
     "netverify://contract",
     "netverify://security",
     "netverify://errors",
+    "skill://triage-backbone/SKILL.md",
 }
 
 #: Templates, as listed by `resources/templates/list`. The Python field is

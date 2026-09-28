@@ -40,13 +40,19 @@ EXPECTED_TOOLS = {
 }
 #: `resources/list` returns concrete resources only. Templates are a separate
 #: list, so asserting the command template here would be asserting the SDK.
+#:
+#: The skill URI is a resource because SEP-2640 rides on Resources, so a host
+#: reaches the workflow at `skill://triage-backbone/SKILL.md` with a plain read.
 EXPECTED_RESOURCES = {
     "netverify://contract",
     "netverify://security",
     "netverify://errors",
+    "skill://triage-backbone/SKILL.md",
 }
 EXPECTED_TEMPLATES = {"netverify://commands/{command_id}"}
 EXPECTED_PROMPTS = {"triage_capture"}
+#: The extension identifier SEP-2640 assigns to skills.
+EXPECTED_EXTENSIONS = {"io.modelcontextprotocol/skills"}
 
 
 async def main() -> int:
@@ -84,6 +90,29 @@ async def main() -> int:
         failures.append(
             f"expected templates {sorted(EXPECTED_TEMPLATES)}, got {sorted(template_uris)}"
         )
+
+    # A skill that is not advertised is a file on disk, not a feature: a host
+    # has no way to learn it exists.
+    extensions = (
+        getattr(
+            server._lowlevel_server.get_capabilities(),
+            "extensions",
+            {},  # noqa: SLF001
+        )
+        or {}
+    )
+    if set(extensions) != EXPECTED_EXTENSIONS:
+        failures.append(
+            f"expected extensions {sorted(EXPECTED_EXTENSIONS)}, got {sorted(extensions)}"
+        )
+
+    # The extension must be readable as a plain resource, and as *text* - a bytes
+    # result reaches the host base64-encoded, which is useless for markdown.
+    skill = list(await server.read_resource("skill://triage-backbone/SKILL.md"))
+    if not isinstance(skill[0].content, str):
+        failures.append("the skill is served as a blob, so a host gets base64")
+    elif "sanitize_device_output" not in skill[0].content:
+        failures.append("the served skill lost its sanitise-first instruction")
 
     ok_result = await server.call_tool(
         "verify_network_output",

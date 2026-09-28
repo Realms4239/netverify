@@ -57,6 +57,7 @@ from netverify.context import bind_request_id
 from netverify.errors import RateLimited, ScopeError
 
 from .prompts import register as register_prompts
+from .skills import SKILL_SCHEME, Skill, SkillsExtension, load_skills
 
 SERVER_NAME = "netverify"
 #: Kept equal to `netverify.__version__` and to the `pyproject.toml` version.
@@ -542,6 +543,10 @@ def build_server() -> Any:
         # Runs inside the SDK's OpenTelemetry span, so anything it stamps is
         # correlated with the request in a trace as well as in the audit log.
         middleware=[_RequestIdMiddleware()],
+        # SEP-2640 skills. Declared here rather than appended to the instance
+        # afterwards, because the SDK validates extension identifiers when it
+        # applies them and a hand-mutated list would skip that check.
+        extensions=[SkillsExtension()],
     )
 
     server.add_tool(
@@ -763,7 +768,42 @@ def build_server() -> Any:
     # the prompt says how to use them, in the order that is actually correct.
     register_prompts(server)
 
+    # The fourth surface: SEP-2640 skills, layered on Resources. Each file in a
+    # skill directory is exposed under the `skill://` scheme, so a host that
+    # already treats MCP resources as a virtual filesystem reads a served skill
+    # exactly as it reads a local one.
+    skills = load_skills()
+    for skill in skills.values():
+        for entry in skill.entry()["resources"]:
+            uri = str(entry["uri"])
+            relative = uri.split(f"{SKILL_SCHEME}{skill.name}/", 1)[-1]
+            server.add_resource(_skill_resource(skill, relative))
+
     return server
+
+
+def _skill_resource(skill: Skill, relative: str) -> Any:
+    """One skill file, as an MCP resource, captured by value.
+
+    `server.add_resource` takes a built `Resource` rather than a callback, so
+    the file is read once here. That is acceptable because a skill is immutable
+    for the life of a process; the alternative, a resource template over a
+    changing directory, would be a dynamic surface this server does not need.
+    """
+    from mcp.server.mcpserver.resources import FunctionResource
+
+    # Decoded to str, not served as bytes. A function returning bytes produces a
+    # BlobResourceContents, so a host would receive base64 for a file whose mime
+    # type says text/markdown - technically correct and practically unreadable.
+    # Skill files are text; serve them as text.
+    text = skill.read(relative).decode("utf-8")
+    return FunctionResource(
+        uri=f"{SKILL_SCHEME}{skill.name}/{relative}",
+        name=f"{skill.name}/{relative}",
+        description=f"Part of the {skill.name} skill served by netverify.",
+        mime_type="text/markdown",
+        fn=lambda _text=text: _text,
+    )
 
 
 def main() -> None:

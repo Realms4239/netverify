@@ -154,6 +154,39 @@ def main() -> int:
             if prompt_names != {"triage_capture"}:
                 failures.append(f"expected prompts ['triage_capture'], got {sorted(prompt_names)}")
 
+        # The skill has to resolve over the real wire too, and specifically as
+        # *text*. A resource that returns bytes reaches the host base64-encoded,
+        # which is unreadable markdown - and that is invisible to every in-process
+        # test, because the SDK coerces based on how the handler returns it.
+        process.stdin.write(
+            _frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "resources/read",
+                    "params": {
+                        "_meta": dict(CLIENT_META),
+                        "uri": "skill://triage-backbone/SKILL.md",
+                    },
+                }
+            )
+        )
+        process.stdin.flush()
+        skill_line = process.stdout.readline()
+        try:
+            contents = json.loads(skill_line.decode("utf-8"))["result"]["contents"]
+            text = contents[0].get("text", "")
+        except (json.JSONDecodeError, KeyError, IndexError, UnicodeDecodeError) as exc:
+            failures.append(f"resources/read did not return the skill: {exc}")
+        else:
+            if not text:
+                failures.append(
+                    "the skill came back with no `text` field, so a host would "
+                    "receive base64 for a markdown document"
+                )
+            elif "sanitize_device_output" not in text:
+                failures.append("the served skill lost its sanitise-first instruction")
+
         # The real proof that audit correlation works end to end, and it has to
         # live here rather than in a unit test. `MCPServer.call_tool()` is the
         # in-process entry point and does NOT run the middleware chain; only the
@@ -222,6 +255,7 @@ def main() -> int:
     print(f"  tools/list returned {len(expected)} read-only tools, stdout stayed pure JSON-RPC")
     print("  a real tools/call was correlated to its request id in the audit log")
     print("  prompts/list returned the triage workflow over the wire")
+    print("  resources/read served the skill as text, not base64")
     return 0
 
 
