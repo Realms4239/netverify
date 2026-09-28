@@ -16,10 +16,10 @@ file. Free text is the alternative and it is not machine-readable, which
 defeats the point of an audit log.
 
 What is recorded, and equally what is not: the command, the verdict, the
-timing, and whether the text was refused. Never the device output itself. An
-audit log that stores the payloads it was meant to protect against becomes a
-second copy of the secret it was written to catch, which is the classic way
-logging turns a control into a liability.
+timing, the id of the request that asked, and whether the text was refused.
+Never the device output itself. An audit log that stores the payloads it was
+meant to protect against becomes a second copy of the secret it was written to
+catch, which is the classic way logging turns a control into a liability.
 """
 
 from __future__ import annotations
@@ -29,6 +29,8 @@ import os
 import sys
 import time
 from typing import Any, TextIO
+
+from .context import current_request_id
 
 
 def _default_sink() -> TextIO:
@@ -92,6 +94,12 @@ class AuditLog:
     ) -> None:
         """Write one audit line. Never raises.
 
+        Stamped with the ambient request id when there is one, which is what
+        turns a log of individual calls into a log of *turns*. See
+        `netverify/context.py` for why it travels by ContextVar rather than as a
+        parameter: threading it through every signature would put a protocol
+        concern into the library's interface.
+
         A logging failure must not take down the tool call it was describing.
         """
         if not self.enabled:
@@ -100,6 +108,11 @@ class AuditLog:
             "ts": round(self._clock(), 3),
             "event": event,
         }
+        # Omitted rather than null when absent, so a grep for request_id
+        # returns only the calls that really belong to a request.
+        request_id = current_request_id()
+        if request_id is not None:
+            entry["request_id"] = request_id
         for key, value in (
             ("command_id", command_id),
             ("ok", ok),

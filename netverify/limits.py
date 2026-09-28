@@ -158,5 +158,3 @@ class Deadline:
                 f"({self.elapsed:.2f}s elapsed). This usually means an input shape "
                 "the size cap did not anticipate; please report it."
             )
-
-        return self._tokens

@@ -61,6 +61,14 @@ class TestMiddlewareIsRegistered(unittest.TestCase):
             f"OpenTelemetryMiddleware is at position {otel_index}, not outermost: {chain!r}",
         )
 
+    def test_request_id_middleware_is_registered(self):
+        """Without it, audit lines have no way to say which call they belong to."""
+        chain = list(self.server.middleware)
+        self.assertTrue(
+            any(type(m).__name__ == "_RequestIdMiddleware" for m in chain),
+            f"no request-id middleware in the chain: {chain!r}",
+        )
+
     def test_status_reports_the_sdk_emits_server_spans(self):
         """The self-report operators read, kept in step with reality."""
         from netverify.telemetry import status

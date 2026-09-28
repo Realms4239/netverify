@@ -25,6 +25,7 @@ changes.
 """
 
 from .analysis import compare_states, synthesize_health
+from .context import bind_request_id, current_request_id
 from .errors import RateLimited, ScopeError
 from .integrity import self_check
 from .limits import DEFAULT_DEADLINE_SECONDS, Deadline, DeadlineExceeded, TokenBucket
@@ -34,7 +35,7 @@ from .sanitize import MAX_BYTES, sanitize, scan
 from .scope import validate
 from .telemetry import configure_from_env
 from .telemetry import status as telemetry_status
-from .verify import MAX_BATCH_ITEMS, verify, verify_many
+from .verify import MAX_BATCH_ITEMS, MAX_TOTAL_INPUT_BYTES, verify, verify_many
 
 __version__ = "1.2.0"
 
@@ -48,14 +49,17 @@ __all__ = [
     "Finding",
     "MAX_BATCH_ITEMS",
     "MAX_BYTES",
+    "MAX_TOTAL_INPUT_BYTES",
     "Outcome",
     "RateLimited",
     "SanitizeReport",
     "ScopeError",
     "TokenBucket",
     "Verdict",
+    "bind_request_id",
     "compare_states",
     "configure_from_env",
+    "current_request_id",
     "describe_all",
     "get",
     "sanitize",

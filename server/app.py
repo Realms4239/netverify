@@ -33,6 +33,7 @@ import sys
 import time
 from typing import Annotated, Any
 
+from mcp.server.context import CallNext, ServerMiddleware, ServerRequestContext
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp_types import ToolAnnotations
 
@@ -52,6 +53,7 @@ from netverify import (
     verify_many,
 )
 from netverify.audit import DEFAULT as AUDIT
+from netverify.context import bind_request_id
 from netverify.errors import RateLimited, ScopeError
 
 SERVER_NAME = "netverify"
@@ -504,6 +506,25 @@ def _security_resource() -> str:
     )
 
 
+class _RequestIdMiddleware(ServerMiddleware):
+    """Publishes the JSON-RPC request id to the library for the length of a call.
+
+    The id originates here, at the protocol edge, but the audit log that needs it
+    lives in `netverify` and must not import anything MCP. Rather than add a
+    parameter to every function - which would put a protocol concern into the
+    library's interface - the id is bound in a `ContextVar` for the duration of
+    the request and read by the audit log. See `netverify/context.py`.
+
+    Binding `None` for a notification is deliberate: a notification has no id,
+    and inheriting the previous request's would mislabel its records. A wrong
+    correlation id is worse than a missing one, because it looks trustworthy.
+    """
+
+    async def __call__(self, ctx: ServerRequestContext, call_next: CallNext) -> Any:
+        with bind_request_id(ctx.request_id):
+            return await call_next(ctx)
+
+
 def build_server() -> Any:
     """Construct the MCPServer with its tools and resources."""
     from mcp.server.mcpserver import MCPServer
@@ -512,6 +533,9 @@ def build_server() -> Any:
         SERVER_NAME,
         version=SERVER_VERSION,
         instructions=INSTRUCTIONS.format(ids=", ".join(sorted(c.id for c in COMMANDS))),
+        # Runs inside the SDK's OpenTelemetry span, so anything it stamps is
+        # correlated with the request in a trace as well as in the audit log.
+        middleware=[_RequestIdMiddleware()],
     )
 
     server.add_tool(

@@ -26,6 +26,7 @@ Exit codes: 0 pass, 1 fail.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -74,7 +75,15 @@ def main() -> int:
         [sys.executable, "-m", "server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        # stderr is piped, not discarded, so this script can assert that audit
+        # records really are written - and, more usefully, that they carry the
+        # id of the request that caused them. A control nobody checks is a
+        # control that quietly stopped working.
+        stderr=subprocess.PIPE,
+        # Pinned rather than inherited: this script asserts audit lines are
+        # written, so it must not silently pass on a machine where auditing was
+        # turned off, nor fail confusingly on one where it was turned on.
+        env={**os.environ, "NETVERIFY_AUDIT": "1"},
         cwd=str(ROOT),
     )
 
@@ -128,6 +137,53 @@ def main() -> int:
                 annotations = tool.get("annotations") or {}
                 if not annotations.get("readOnlyHint"):
                     failures.append(f"{tool['name']} is not annotated read-only")
+
+        # The real proof that audit correlation works end to end, and it has to
+        # live here rather than in a unit test. `MCPServer.call_tool()` is the
+        # in-process entry point and does NOT run the middleware chain; only the
+        # request dispatcher does. A test using it would pass happily while the
+        # real path stayed uncorrelated, which is the exact bug worth catching.
+        process.stdin.write(
+            _frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 77,
+                    "method": "tools/call",
+                    "params": {
+                        "_meta": dict(CLIENT_META),
+                        "name": "verify_network_output",
+                        "arguments": {
+                            "command": "srl_interface_brief",
+                            "output": "| ethernet-1/1 | enable | up |",
+                            "interface": "ethernet-1/1",
+                        },
+                    },
+                }
+            )
+        )
+        process.stdin.flush()
+        third = process.stdout.readline()
+        if not third:
+            failures.append("tools/call produced no response")
+        else:
+            # Close stdin so the server exits on its own; terminating it here
+            # would truncate the audit stream this assertion reads.
+            process.stdin.close()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:  # pragma: no cover
+                process.terminate()
+            audit = (process.stderr.read() or b"").decode("utf-8", "replace")
+            entries = [
+                json.loads(line) for line in audit.splitlines() if line.strip().startswith("{")
+            ]
+            if not entries:
+                failures.append(
+                    "the tool call wrote no audit lines to stderr; audit logging "
+                    "is a control, and a silently broken one is worse than none"
+                )
+            elif not all(e.get("request_id") == "77" for e in entries):
+                failures.append(f"audit lines are not correlated to request 77: {entries}")
     except BrokenPipeError:
         failures.append("the server closed stdout before answering; it likely crashed")
     finally:
@@ -147,6 +203,7 @@ def main() -> int:
     print("STDIO CHECK OK")
     print(f"  server/discover advertised {PROTOCOL_VERSION} over a real pipe")
     print(f"  tools/list returned {len(expected)} read-only tools, stdout stayed pure JSON-RPC")
+    print("  a real tools/call was correlated to its request id in the audit log")
     return 0
 
 

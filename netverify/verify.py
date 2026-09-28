@@ -18,8 +18,9 @@ from typing import Any
 
 from .audit import DEFAULT
 from .errors import ScopeError
+from .limits import Deadline
 from .models import Outcome, Verdict
-from .sanitize import sanitize
+from .sanitize import MAX_BYTES, sanitize
 from .scope import validate
 from .telemetry import (
     ATTR_COMMAND_ID,
@@ -136,6 +137,26 @@ def verify(
 MAX_BATCH_ITEMS = 200
 
 
+#: Maximum total input bytes one `verify_many` call may carry.
+#:
+#: `MAX_BATCH_ITEMS` bounds the *count*, but count is the wrong axis. Measured on
+#: this machine with `scripts/bench.py`, twelve regex passes over a 64 KiB
+#: cap-sized input cost ~133 ms in the adversarial case, and 200 of them cost
+#: 5.2 s - all inside a single tool call, on the one surface an agent already
+#: has sanctioned access to. Counting entries would have let that through
+#: comfortably: 200 is well under the item cap and still five seconds of work.
+#:
+#: So the bound is on bytes, which is the actual cost driver and is
+#: deterministic. Four cap-sized inputs is far more than any real incident
+#: capture - a full `show interface brief` is around 500 bytes - while capping a
+#: worst-case batch at roughly 0.5 s.
+#:
+#: This is deliberately a byte budget and not a wall-clock deadline. A clock is
+#: non-deterministic, so it would make CI flaky and would fire *after* the work
+#: rather than before it. A limit applied after the work is not a limit.
+MAX_TOTAL_INPUT_BYTES = 4 * MAX_BYTES
+
+
 def verify_many(items: list[dict[str, Any]], *, audit: Any = DEFAULT) -> list[Verdict | Exception]:
     """Verify a batch, one result per input, in order.
 
@@ -165,8 +186,34 @@ def verify_many(items: list[dict[str, Any]], *, audit: Any = DEFAULT) -> list[Ve
             "server for every other caller."
         )
 
-    results: list[Verdict | Exception] = []
+    # Enforced before any entry is processed, so an over-budget batch costs a
+    # length sum and nothing more. Checking per entry as we went would mean
+    # discovering the overrun after doing most of the work, which is the failure
+    # this budget exists to prevent.
+    total_bytes = 0
     for item in items:
+        if isinstance(item, dict) and isinstance(item.get("output"), str):
+            total_bytes += len(item["output"].encode("utf-8", errors="replace"))
+            if total_bytes > MAX_TOTAL_INPUT_BYTES:
+                raise ScopeError(
+                    f"batch carries more than {MAX_TOTAL_INPUT_BYTES} bytes of device "
+                    f"output, above the {MAX_TOTAL_INPUT_BYTES}-byte budget for one "
+                    "call. Each entry is already capped, but the aggregate is what "
+                    "costs; split the capture across several calls."
+                )
+
+    results: list[Verdict | Exception] = []
+    deadline = Deadline()
+
+    for item in items:
+        # Wall-clock backstop, checked on entry to each entry. Be precise about
+        # what it can and cannot do: a deadline cannot preempt a regex pass, so
+        # the byte budget above is the control that actually bounds the work.
+        # This exists so a future path that is *not* byte-bounded still cannot
+        # hold the process indefinitely, and so an overrun is visible in the
+        # audit log rather than passing silently.
+        deadline.check("verify_many")
+
         if not isinstance(item, dict):
             results.append(
                 ScopeError(f"capture entry must be an object, got {type(item).__name__}")
