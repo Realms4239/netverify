@@ -72,8 +72,7 @@ async def main() -> int:
     template_uris = {t.uri_template for t in templates}
     if template_uris != EXPECTED_TEMPLATES:
         failures.append(
-            f"expected templates {sorted(EXPECTED_TEMPLATES)}, "
-            f"got {sorted(template_uris)}"
+            f"expected templates {sorted(EXPECTED_TEMPLATES)}, got {sorted(template_uris)}"
         )
 
     ok_result = await server.call_tool(

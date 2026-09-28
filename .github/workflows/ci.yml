@@ -54,6 +54,12 @@ jobs:
         # the contract check into a no-op.
         run: python scripts/check_upstream_parity.py --offline
 
+      - name: Assert the zero-dependency claim
+        # The library ships no dependencies on purpose, so that is checked by
+        # static import analysis rather than trusted. Catches the moment a
+        # library creeps in, or a guarded optional import stops being guarded.
+        run: python scripts/check_dependencies.py
+
       - name: Run the test suite
         # stdlib unittest on purpose: no pytest install, no plugin discovery, and
         # identical behaviour on a laptop with nothing installed.
