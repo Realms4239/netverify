@@ -1086,11 +1086,25 @@ def main() -> None:
     and the SDK's spans stay a no-op, which is the right default: a server
     silently buffering spans nobody exports is worse than one that emits none.
     """
-    from netverify import configure_from_env
+    from netverify import configure_from_env, telemetry_status
 
     if configure_from_env():
         # stderr, never stdout: on stdio the protocol owns stdout.
         print("netverify: tracing enabled", file=sys.stderr)
+
+    # Metrics are configured separately from traces and can fail independently:
+    # the OTLP *metric* exporter is an optional package that the trace exporter
+    # does not drag in. So the startup line reports them separately, and a
+    # failure is named rather than swallowed. A counter that silently goes
+    # nowhere is worse than one that is visibly absent, because an empty
+    # dashboard reads as "no traffic" rather than "not measuring" - and during
+    # an incident those two look identical until someone checks.
+    metrics = telemetry_status()
+    if metrics["metrics_exporting"]:
+        print(f"netverify: metrics exporting ({metrics['metrics_state']})", file=sys.stderr)
+    elif str(metrics["metrics_state"]).startswith("failed:"):
+        print(f"netverify: metrics NOT exported - {metrics['metrics_state']}", file=sys.stderr)
+
     build_server().run()
 
 

@@ -213,10 +213,39 @@ Built on **MCP revision 2026-07-28** via `mcp` 2.x:
   With no exporter configured the SDK's spans stay a no-op, deliberately: a
   server silently buffering spans nobody exports is worse than one that emits
   none.
+  **Metrics** ride the same two variables and are separate instruments:
+  `netverify.verdicts` (by command and outcome), `netverify.findings` (by kind
+  and severity), `netverify.call.duration`, `netverify.rate_limited`, and
+  `netverify.refused` (by a stable reason code, never by prose). They exist for
+  the questions spans cannot answer: failure rate by command across 400
+  interfaces, or whether `verdict_coercion` findings are spiking fleet-wide.
+  `self_check` reports `metrics_state`, which is what *happened* rather than what
+  was asked for — `exporting:otlp`, `not-configured`, `host-provider`, or
+  `failed:no-metric-exporter (...)`. The last one is real: the OTLP metric
+  exporter is an optional package the trace exporter does not pull in, and an
+  empty dashboard reads as "no traffic" rather than "not measuring".
+- **Progress notifications** on `verify_capture`, the one call long enough to be
+  mistaken for a hang. The library takes a plain synchronous callback and never
+  imports `asyncio` — a verifier with no route to the device has no business
+  importing it — so the coroutine lives in the adapter, which bridges to
+  whichever loop owns the call.
+- **Cache hints** (SEP-2549) on all six cacheable methods, `public` with a
+  five-minute TTL, because each returns a pure function of this process's own
+  source and holds no per-session state. `tools/call` is not in the cacheable set
+  at all, so no verdict is ever served from a cache.
 - **A frozen tool contract.** `tests/test_contract.py` pins the tool names,
   arguments, output schemas and resource URIs, so a rename becomes a visible diff
   instead of a client that quietly stops working. Behaviour tests cannot catch
   that — a renamed tool with identical behaviour passes every one of them.
+
+Refusals are machine-readable as well as readable. Every `ScopeError` carries a
+stable `reason` — `not_in_allowlist`, `missing_argument`, `unknown_argument`,
+`bad_argument`, `oversize_output`, `oversize_batch`, `non_list_batch`,
+`rate_limited` — and, once the id is known to be in the allowlist, the `command`
+it was about. The labels are deliberately bounded: a `not_in_allowlist` refusal
+carries no command, because there the id is whatever the caller invented and
+labelling it would let one caller mint a metric series per request.
+`tests/test_refusal_reasons.py` pins one case per raise site.
 
 The tool signature is deliberately explicit rather than `**kwargs`, because the
 SDK derives the input schema from it and a catch-all becomes a required

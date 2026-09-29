@@ -142,6 +142,17 @@ MUTATIONS: list[tuple[str, str, str, str, bool]] = [
         "a long batch reports nothing, so a client cannot tell it from a hang",
         False,
     ),
+    (
+        # The regression this cycle was written to close: metrics were wired to
+        # the console exporter only, so the OTLP deployment - the one the traces
+        # actually go to - exported traces and no counters. Reachable again by
+        # "simplifying" the env check down to the one mode that was tested.
+        "netverify/telemetry.py",
+        '    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):',
+        "    if False:  # MUTANT: OTLP ignored for metrics",
+        "metrics stop being exported in the deployment the traces are exported to",
+        False,
+    ),
 ]
 
 

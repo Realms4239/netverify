@@ -46,6 +46,24 @@ re-implementing anything here.
 | — | Stable refusal codes (found in review) | **DONE** | `errors.REASON_*`, `ScopeError.reason`/`.command`; `tests/test_refusal_reasons.py` |
 | — | Thread safety for global state (found in review) | **DONE** | locks in `TokenBucket` and `AuditLog`; `tests/test_limits_audit.py` |
 
+### A fourth, added after the first gate run
+
+**`status()` reports what happened, not what was asked for.** The first version
+of the metrics wiring consulted only `NETVERIFY_OTEL_CONSOLE`, so in the
+configuration this library is actually deployed in — `OTEL_EXPORTER_OTLP_ENDPOINT`,
+the collector the traces go to — it returned immediately. Traces exported, every
+counter went nowhere, and the console path that *did* work is the one nobody
+deploys with. `metrics_state` exists so that failure is visible from `self_check`
+instead of inferred from an empty dashboard: `exporting:<name>`,
+`not-configured`, `host-provider`, or `failed:no-metric-exporter (...)`. Pinned
+by mutation #14, which flips the OTLP check back to console-only.
+
+Two traps found by running it rather than reading it: `ImportError.name` for a
+missing subpackage is the *outermost* missing module (`opentelemetry.exporter`),
+so the state names the intent as well as the cause; and the OTLP *metric*
+exporter is an optional package the trace exporter does not pull in, so
+`failed:` is a real state here, not a hypothetical one.
+
 ### Three design points worth not undoing
 
 **The library cannot import `asyncio`.** `integrity.py` lists it among the

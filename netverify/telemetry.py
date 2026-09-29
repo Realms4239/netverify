@@ -248,41 +248,114 @@ def record_refused(reason: str, command: str | None = None) -> None:
     _record(_counter(METRIC_REFUSED, "Calls refused by scope validation."), 1, attrs)
 
 
-def _configure_metrics_from_env() -> None:
-    """Attach a metric exporter when the environment asks for one.
+#: What actually happened to the metric pipeline, as opposed to what the
+#: environment asked for. Read by `status()` so `self_check` can tell an operator
+#: whether the counters are going anywhere, and written by
+#: `_configure_metrics_from_env` because "the env var is set" and "a reader is
+#: installed" are different claims - the difference is a missing exporter package,
+#: which is the normal state in a lab.
+#:
+#: The four states, in the order an operator cares about:
+#:
+#: - `"exporting:<name>"` - we installed a reader, and it is exporting.
+#: - `"host-provider"` - something else installed a meter provider first, so ours
+#:   was not installed. Not a failure: the host's provider may well export. We
+#:   cannot know, so we do not claim either way.
+#: - `"not-configured"` - nobody asked for metrics. The correct default.
+#: - `"failed:<reason>"` - asked for, and could not. Said out loud rather than
+#:   swallowed, because a counter that silently goes nowhere is worse than one
+#:   that is visibly absent.
+_METRICS_STATE = "not-configured"
 
-    Best-effort and silent: metrics ride the same opt-in env as traces
-    (`NETVERIFY_OTEL_CONSOLE=1` or `OTEL_EXPORTER_OTLP_ENDPOINT`), and a
-    missing SDK exporter package degrades to in-process aggregation rather
-    than breaking startup. Never raises.
+
+def _metric_exporter() -> tuple[Any, str] | None:
+    """The metric exporter the environment asks for, or None for "no metrics".
+
+    Chosen the same way `configure_from_env` chooses its span exporter, and for
+    the same reason: the machine decides, not a hard-coded preference. An earlier
+    version consulted only `NETVERIFY_OTEL_CONSOLE`, so in the deployment this
+    exists for - `OTEL_EXPORTER_OTLP_ENDPOINT`, the collector F2 speaks to -
+    traces were exported and every counter went nowhere, and the console path
+    that did work is the one nobody deploys with.
+
+    Returns `(exporter, name)`, or None when neither env var asks for metrics.
+    Raises ImportError when the env asks for a mode whose exporter package is
+    not installed; the caller turns that into a reported state rather than
+    letting startup fail over optional instrumentation.
     """
-    if not IS_INSTRUMENTED or _metrics_api is None:  # pragma: no cover
-        return
-    try:
-        from opentelemetry.sdk.metrics import MeterProvider
-        from opentelemetry.sdk.metrics.export import (
-            ConsoleMetricExporter,
-            PeriodicExportingMetricReader,
+    if os.environ.get("NETVERIFY_OTEL_CONSOLE") == "1":
+        from opentelemetry.sdk.metrics.export import ConsoleMetricExporter
+
+        return ConsoleMetricExporter(), "console"
+
+    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        # HTTP/protobuf, matching the span exporter in `configure_from_env`. The
+        # two must agree: a traces-only OTLP collector and a metrics-only one
+        # pointed at the same endpoint is a support ticket nobody enjoys.
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
         )
 
-        if os.environ.get("NETVERIFY_OTEL_CONSOLE") != "1":
-            return
-        # A provider can only be set once per process; a test or an earlier
-        # call may already have installed one. Overwriting it would drop
-        # already-created instruments, so only set when nobody has.
-        try:
-            provider = MeterProvider(
-                metric_readers=[
-                    PeriodicExportingMetricReader(
-                        ConsoleMetricExporter(), export_interval_millis=5_000
-                    )
-                ]
-            )
-            _metrics_api.set_meter_provider(provider)
-        except Exception:  # noqa: BLE001 - a provider is already installed
-            return
-    except Exception:  # noqa: BLE001 - telemetry must never break startup
+        return OTLPMetricExporter(), "otlp"
+
+    return None
+
+
+def _configure_metrics_from_env() -> None:
+    """Attach a metric reader when the environment asks for one.
+
+    Best-effort and never raising: a missing exporter package degrades to
+    in-process aggregation rather than breaking startup, and the reason is
+    recorded in `_METRICS_STATE` so `status()` can report it instead of leaving
+    an operator to guess.
+    """
+    global _METRICS_STATE
+
+    if not IS_INSTRUMENTED or _metrics_api is None:  # pragma: no cover
         return
+
+    try:
+        chosen = _metric_exporter()
+    except ImportError as exc:
+        # `ImportError.name` for a missing subpackage is the *outermost* module
+        # that could not be found - reaching for the metric exporter when no OTLP
+        # package is installed reports `opentelemetry.exporter`, with no hint that
+        # metrics were what we were after. So the state names both the intent and
+        # the cause: a bare `failed:opentelemetry.exporter` would send an operator
+        # looking at the wrong package.
+        _METRICS_STATE = f"failed:no-metric-exporter ({exc.name or 'import failed'})"
+        return
+    except Exception as exc:  # noqa: BLE001 - telemetry must never break startup
+        _METRICS_STATE = f"failed:{type(exc).__name__}"
+        return
+
+    if chosen is None:
+        _METRICS_STATE = "not-configured"
+        return
+    exporter, name = chosen
+
+    try:
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+
+        provider = MeterProvider(
+            metric_readers=[PeriodicExportingMetricReader(exporter, export_interval_millis=5_000)]
+        )
+        _metrics_api.set_meter_provider(provider)
+    except Exception as exc:  # noqa: BLE001
+        # `set_meter_provider` only sets once, and warns rather than raises when
+        # a provider is already installed. So this is the "the host got there
+        # first" case far more often than it is a real failure, and calling it a
+        # failure would be a lie that sends someone hunting a bug that is not
+        # there. The host's provider may well export these metrics itself.
+        already = _metrics_api.get_meter_provider()
+        if type(already).__name__ != "ProxyMeterProvider":
+            _METRICS_STATE = "host-provider"
+            return
+        _METRICS_STATE = f"failed:{type(exc).__name__}"
+        return
+
+    _METRICS_STATE = f"exporting:{name}"
 
 
 def configure_from_env() -> bool:
@@ -361,7 +434,15 @@ def span(name: str, **attributes: Any) -> Iterator[Any]:
 
 
 def status() -> dict[str, Any]:
-    """A small, serialisable description of the tracing state."""
+    """A small, serialisable description of the tracing and metrics state.
+
+    `metrics_state` is the field that matters most and is the one an earlier
+    version lacked. `exporter` below answers "what did the environment ask
+    for"; this answers "did it happen". Those differ exactly when it matters -
+    the env var is set, the exporter package is missing, and every counter is
+    incrementing into a void that a dashboard will never show. An operator
+    reading `self_check` should not have to know that to find out.
+    """
     return {
         "instrumented": IS_INSTRUMENTED,
         "tracer": TRACER_NAME,
@@ -373,6 +454,8 @@ def status() -> dict[str, Any]:
             METRIC_RATE_LIMITED,
             METRIC_REFUSED,
         ],
+        "metrics_state": _METRICS_STATE,
+        "metrics_exporting": _METRICS_STATE.startswith("exporting:"),
         "sdk_emits_server_spans": True,
         "exporter": (
             "console"

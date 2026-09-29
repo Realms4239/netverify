@@ -18,6 +18,7 @@ orphan and every dashboard quietly empties - with no behaviour test failing.
 That is the failure this file exists to prevent.
 """
 
+import os
 import unittest
 
 
@@ -629,6 +630,169 @@ class TestNoPayloadsInTelemetry(_MetricsCase):
             if name == "netverify.finding.kind"
         }
         self.assertEqual(kinds, {"credential"})
+
+
+class TestMetricExportIsWired(unittest.TestCase):
+    """Does the environment asking for metrics actually produce an exporter?
+
+    The bug this class exists for: `_configure_metrics_from_env` consulted only
+    `NETVERIFY_OTEL_CONSOLE`, so in the configuration this library is deployed in
+    - `OTEL_EXPORTER_OTLP_ENDPOINT`, the collector the traces go to - it returned
+    immediately. Every counter incremented into a void. The console path worked,
+    which is the one nobody deploys with, so nothing looked wrong.
+
+    Each test restores the environment and the recorded state, because both are
+    process-wide and a leaked one turns the next test into a false pass.
+    """
+
+    def setUp(self):
+        try:
+            import opentelemetry.sdk.metrics  # noqa: F401
+        except ImportError:  # pragma: no cover - the sdk is a dev dependency
+            self.skipTest("opentelemetry-sdk is not installed")
+
+        from netverify import telemetry
+
+        self.telemetry = telemetry
+        self._env = {
+            key: os.environ.pop(key, None)
+            for key in ("NETVERIFY_OTEL_CONSOLE", "OTEL_EXPORTER_OTLP_ENDPOINT")
+        }
+        self._state = telemetry._METRICS_STATE  # noqa: SLF001
+
+        def restore():
+            for key, value in self._env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            telemetry._METRICS_STATE = self._state  # noqa: SLF001
+
+        self.addCleanup(restore)
+
+    def _configure(self):
+        self.telemetry._configure_metrics_from_env()  # noqa: SLF001
+        return self.telemetry.status()["metrics_state"]
+
+    def test_the_otlp_endpoint_now_reaches_the_metric_exporter(self):
+        """The regression, stated as a test.
+
+        In an environment with the exporter installed this reaches
+        `exporting:otlp`. Without it the honest answer is `failed:...` - and
+        either way the state says what happened, which is the point. Asserting
+        only `!= not-configured` is deliberate: it is the assertion that fails on
+        the old code, and it does not depend on which exporter package this lab
+        happens to have.
+        """
+        os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://collector:4318"
+
+        state = self._configure()
+
+        self.assertNotEqual(state, "not-configured", "the OTLP env was ignored for metrics")
+        if state.startswith("failed:"):
+            # The package is absent here, so the failure must *name* what is
+            # missing - otherwise an operator has nothing to act on.
+            self.assertIn("no-metric-exporter", state)
+        else:
+            self.assertEqual(state, "exporting:otlp")
+
+    def test_the_console_mode_is_selected_when_asked_for(self):
+        """Selection only, deliberately.
+
+        Installing the real `ConsoleMetricExporter` here dumps a JSON blob into
+        the suite output, and not only during the call: the reader exports on its
+        own interval, so the noise arrives after any `redirect_stdout` has closed.
+        A suite that prints telemetry between test cases trains people to scroll
+        past the run, which is how the one real failure gets missed. The install
+        path is covered below with a silent exporter instead.
+        """
+        os.environ["NETVERIFY_OTEL_CONSOLE"] = "1"
+
+        self.assertEqual(self.telemetry._metric_exporter()[1], "console")  # noqa: SLF001
+
+    def test_a_reader_is_installed_when_an_exporter_is_chosen(self):
+        """The install path, with an exporter that writes nowhere.
+
+        A stub, not the console one, for the reason above. It still exercises
+        what matters: the provider is built, the reader is attached, the provider
+        is installed, and the state says so.
+        """
+
+        class SilentExporter:
+            def export(self, *_args, **_kwargs):
+                return None
+
+            def force_flush(self, timeout_millis: float = 10_000) -> bool:
+                return True
+
+            def shutdown(self, timeout_millis: float = 30_000, **kwargs) -> None:
+                return None
+
+        original = self.telemetry._metric_exporter  # noqa: SLF001
+        self.telemetry._metric_exporter = lambda: (SilentExporter(), "otlp")  # type: ignore[method-assign]  # noqa: SLF001
+        self.addCleanup(setattr, self.telemetry, "_metric_exporter", original)
+
+        state = self._configure()
+
+        # `host-provider` is a legitimate outcome when an earlier test installed a
+        # meter provider first: our reader was not installed, but the host's
+        # provider may well export these metrics, and claiming otherwise would be
+        # the dishonest option.
+        self.assertIn(state, ("exporting:otlp", "host-provider"))
+        if state == "exporting:otlp":
+            self.assertTrue(self.telemetry.status()["metrics_exporting"])
+
+    def test_nothing_configured_means_no_exporter(self):
+        """The default: absent env means absent metrics, and it says so."""
+        self.assertEqual(self._configure(), "not-configured")
+
+    def test_console_wins_when_both_are_set(self):
+        """Deterministic precedence, pinned so it cannot flip silently.
+
+        The trace path checks the console first too; the two must agree, or a
+        deployment exporting traces to a collector and metrics to stdout is a
+        genuinely confusing afternoon.
+        """
+        os.environ["NETVERIFY_OTEL_CONSOLE"] = "1"
+        os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://collector:4318"
+
+        self.assertEqual(self.telemetry._metric_exporter()[1], "console")  # noqa: SLF001
+
+    def test_status_separates_what_was_asked_for_from_what_happened(self):
+        """`exporter` is the request; `metrics_state` is the outcome.
+
+        The two must be able to disagree, and the whole value of `metrics_state`
+        is that they do.
+        """
+        os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://collector:4318"
+        self._configure()
+
+        report = self.telemetry.status()
+
+        self.assertEqual(report["exporter"], "otlp", "the request should be reported")
+        self.assertIn("metrics_state", report)
+        self.assertEqual(
+            report["metrics_exporting"],
+            report["metrics_state"].startswith("exporting:"),
+            "the boolean and the state must not drift apart",
+        )
+
+    def test_a_failed_export_is_reported_rather_than_swallowed(self):
+        """The failure mode that motivated the field: asked for, did not happen."""
+
+        def explode():
+            raise ImportError("opentelemetry.exporter.otlp.proto.http.metric_exporter")
+
+        original = self.telemetry._metric_exporter  # noqa: SLF001
+        self.telemetry._metric_exporter = explode  # type: ignore[method-assign]  # noqa: SLF001
+        self.addCleanup(setattr, self.telemetry, "_metric_exporter", original)
+        os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://collector:4318"
+
+        state = self._configure()
+
+        self.assertTrue(state.startswith("failed:"), state)
+        self.assertIn("no-metric-exporter", state)
+        self.assertFalse(self.telemetry.status()["metrics_exporting"])
 
 
 if __name__ == "__main__":
