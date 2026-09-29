@@ -26,7 +26,18 @@ changes.
 
 from .analysis import compare_states, synthesize_health
 from .context import bind_request_id, current_request_id
-from .errors import RateLimited, ScopeError
+from .errors import (
+    REASON_BAD_ARGUMENT,
+    REASON_MISSING_ARGUMENT,
+    REASON_NON_LIST_BATCH,
+    REASON_NOT_IN_ALLOWLIST,
+    REASON_OVERSIZE_BATCH,
+    REASON_OVERSIZE_OUTPUT,
+    REASON_RATE_LIMITED,
+    REASON_UNKNOWN_ARGUMENT,
+    RateLimited,
+    ScopeError,
+)
 from .integrity import self_check
 from .limits import DEFAULT_DEADLINE_SECONDS, Deadline, DeadlineExceeded, TokenBucket
 from .models import Check, Finding, Outcome, SanitizeReport, Verdict
@@ -51,6 +62,14 @@ __all__ = [
     "MAX_BYTES",
     "MAX_TOTAL_INPUT_BYTES",
     "Outcome",
+    "REASON_BAD_ARGUMENT",
+    "REASON_MISSING_ARGUMENT",
+    "REASON_NON_LIST_BATCH",
+    "REASON_NOT_IN_ALLOWLIST",
+    "REASON_OVERSIZE_BATCH",
+    "REASON_OVERSIZE_OUTPUT",
+    "REASON_RATE_LIMITED",
+    "REASON_UNKNOWN_ARGUMENT",
     "RateLimited",
     "SanitizeReport",
     "ScopeError",

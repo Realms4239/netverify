@@ -116,6 +116,32 @@ MUTATIONS: list[tuple[str, str, str, str, bool]] = [
         # mutant is caught by the tab regression test.
         False,
     ),
+    (
+        # The instrumentation cycle. These three exist because "we added a
+        # counter" is a claim no behaviour test can check: a `record_*` call
+        # removed, or a refusal reason left unset, changes nothing a caller
+        # sees. Only a test that reads the instrument back would notice, so
+        # without these mutations the new tests could be decorative.
+        "netverify/scope.py",
+        "            reason=REASON_NOT_IN_ALLOWLIST,",
+        "            # MUTANT: refusal reason dropped",
+        "a refusal reaches the metrics with no reason, so it lands in the generic bucket",
+        False,
+    ),
+    (
+        "netverify/telemetry.py",
+        '    _record(\n        _counter(METRIC_VERDICTS, "Verdicts by command and outcome."),',
+        "    _record(\n        None,  # MUTANT: verdict counter disabled",
+        "verdicts stop being counted, so failure rate by command is unavailable",
+        False,
+    ),
+    (
+        "netverify/verify.py",
+        "                    progress(index, total)",
+        "                    pass  # MUTANT: no progress reported",
+        "a long batch reports nothing, so a client cannot tell it from a hang",
+        False,
+    ),
 ]
 
 

@@ -14,10 +14,16 @@ separates them and `ok` is only ever False because the network failed a check.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from .audit import DEFAULT
-from .errors import ScopeError
+from .errors import (
+    REASON_BAD_ARGUMENT,
+    REASON_NON_LIST_BATCH,
+    REASON_OVERSIZE_BATCH,
+    ScopeError,
+)
 from .limits import Deadline
 from .models import Outcome, Verdict
 from .sanitize import MAX_BYTES, sanitize
@@ -31,8 +37,20 @@ from .telemetry import (
     ATTR_TOOL,
     ATTR_VERDICT_OK,
     ATTR_VERDICT_OUTCOME,
+    record_duration,
+    record_verdict,
     span,
 )
+
+#: Progress callback shape for `verify_many`: `(done, total) -> None`.
+#:
+#: Named and exported rather than spelled inline at the call site, because the
+#: *absence* of an event loop is the design decision here and it deserves a
+#: single obvious place to point at. The library cannot await anything - it must
+#: not even import `asyncio`, which `integrity.py` lists as network-capable - so
+#: this is a plain synchronous function and bridging it to a loop is the
+#: caller's business.
+ProgressFn = Callable[[int, int], None]
 
 
 def verify(
@@ -112,10 +130,19 @@ def verify(
         # Set after the work, because they are only knowable afterwards. This is
         # the whole point of instrumenting a verifier: a trace answers "did this
         # link pass, and how big was the input" without anyone reading logs.
+        # Attributes carry only fixed vocabulary (ids, outcome enums, counts) -
+        # never raw device text; see TestNoPayloadsInTelemetry.
         if active is not None:
             active.set_attribute(ATTR_VERDICT_OK, verdict.ok)
             active.set_attribute(ATTR_VERDICT_OUTCOME, verdict.outcome.value)
             active.set_attribute(ATTR_OUTPUT_BYTES, len(observed))
+
+    duration_s = time.perf_counter() - started
+    # Aggregate answers for the incident questions traces cannot serve:
+    # failure rate by command, and the adversarial finding counters that make
+    # a spike in prompt-injection attempts visible fleet-wide.
+    record_verdict(spec.id, verdict.outcome.value)
+    record_duration("verify", duration_s)
 
     if audit is not None:
         audit.record(
@@ -123,7 +150,7 @@ def verify(
             command_id=spec.id,
             ok=verdict.ok,
             outcome=verdict.outcome.value,
-            duration_ms=(time.perf_counter() - started) * 1000,
+            duration_ms=duration_s * 1000,
         )
     return verdict
 
@@ -157,7 +184,12 @@ MAX_BATCH_ITEMS = 200
 MAX_TOTAL_INPUT_BYTES = 4 * MAX_BYTES
 
 
-def verify_many(items: list[dict[str, Any]], *, audit: Any = DEFAULT) -> list[Verdict | Exception]:
+def verify_many(
+    items: list[dict[str, Any]],
+    *,
+    audit: Any = DEFAULT,
+    progress: ProgressFn | None = None,
+) -> list[Verdict | Exception]:
     """Verify a batch, one result per input, in order.
 
     One bad item does not abort the batch. An operator checking forty
@@ -169,6 +201,14 @@ def verify_many(items: list[dict[str, Any]], *, audit: Any = DEFAULT) -> list[Ve
     caller can tell *which* input was rejected. Re-raising would lose the
     positional correspondence.
 
+    Args:
+        items: The captures to verify.
+        audit: The log to record each verification in, or None for none.
+        progress: Optional callback, `progress(done, total)`, invoked after each
+            entry. A 200-entry batch is the one call in this library long enough
+            that a client staring at a silent connection cannot tell it apart
+            from a hang.
+
     Raises:
         ScopeError: if `items` is not a list, or carries more than
             `MAX_BATCH_ITEMS` entries. Both are refusals about the shape of the
@@ -178,12 +218,16 @@ def verify_many(items: list[dict[str, Any]], *, audit: Any = DEFAULT) -> list[Ve
             positional answer.
     """
     if not isinstance(items, list):
-        raise ScopeError(f"expected a list of captures, got {type(items).__name__}")
+        raise ScopeError(
+            f"expected a list of captures, got {type(items).__name__}",
+            reason=REASON_NON_LIST_BATCH,
+        )
     if len(items) > MAX_BATCH_ITEMS:
         raise ScopeError(
             f"batch has {len(items)} entries, above the {MAX_BATCH_ITEMS} limit. "
             "Split it into several calls; one oversized batch would block the "
-            "server for every other caller."
+            "server for every other caller.",
+            reason=REASON_OVERSIZE_BATCH,
         )
 
     # Enforced before any entry is processed, so an over-budget batch costs a
@@ -199,13 +243,15 @@ def verify_many(items: list[dict[str, Any]], *, audit: Any = DEFAULT) -> list[Ve
                     f"batch carries more than {MAX_TOTAL_INPUT_BYTES} bytes of device "
                     f"output, above the {MAX_TOTAL_INPUT_BYTES}-byte budget for one "
                     "call. Each entry is already capped, but the aggregate is what "
-                    "costs; split the capture across several calls."
+                    "costs; split the capture across several calls.",
+                    reason=REASON_OVERSIZE_BATCH,
                 )
 
     results: list[Verdict | Exception] = []
     deadline = Deadline()
+    total = len(items)
 
-    for item in items:
+    for index, item in enumerate(items, start=1):
         # Wall-clock backstop, checked on entry to each entry. Be precise about
         # what it can and cannot do: a deadline cannot preempt a regex pass, so
         # the byte budget above is the control that actually bounds the work.
@@ -214,20 +260,43 @@ def verify_many(items: list[dict[str, Any]], *, audit: Any = DEFAULT) -> list[Ve
         # audit log rather than passing silently.
         deadline.check("verify_many")
 
-        if not isinstance(item, dict):
-            results.append(
-                ScopeError(f"capture entry must be an object, got {type(item).__name__}")
-            )
-            continue
         try:
-            results.append(
-                verify(
-                    item.get("command", ""),
-                    item.get("output", ""),
-                    audit=audit,
-                    **{k: v for k, v in item.items() if k not in ("command", "output")},
+            if not isinstance(item, dict):
+                results.append(
+                    ScopeError(
+                        f"capture entry must be an object, got {type(item).__name__}",
+                        reason=REASON_BAD_ARGUMENT,
+                    )
                 )
-            )
-        except ValueError as exc:
-            results.append(exc)
+                continue
+            try:
+                results.append(
+                    verify(
+                        item.get("command", ""),
+                        item.get("output", ""),
+                        audit=audit,
+                        **{k: v for k, v in item.items() if k not in ("command", "output")},
+                    )
+                )
+            except ValueError as exc:
+                results.append(exc)
+        finally:
+            # Wrapping the refusal branch too, so every entry advances the count
+            # exactly once. A progress channel that stalls whenever the work gets
+            # interesting is worse than none: the interesting entries are the
+            # refused ones.
+            #
+            # Deliberately synchronous and unawaited. This module cannot import
+            # `asyncio` - `integrity.py` lists it among the network-capable
+            # modules precisely because it *can* open a socket, and a verifier
+            # with no route to the device has no business importing it. The
+            # callback is therefore a plain function, and bridging it to an event
+            # loop is the caller's job (the MCP adapter does it with anyio's
+            # thread trampoline). A callback that raises is swallowed: progress
+            # must never be the reason a batch fails.
+            if progress is not None:
+                try:
+                    progress(index, total)
+                except Exception:  # noqa: BLE001,S110 - progress must not break work
+                    pass
     return results

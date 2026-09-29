@@ -167,5 +167,469 @@ class TestSpansNestUnderTheRequest(unittest.TestCase):
         self.assertEqual(len(ours[0].events), 0, "a failed check must not raise")
 
 
+class _MetricsCase(unittest.TestCase):
+    """Installs an in-memory meter provider and reads back what was recorded.
+
+    The provider is installed by assigning the module global rather than through
+    `set_meter_provider`, for the same reason the span tests assign
+    `trace._TRACER_PROVIDER`: the public setter refuses to overwrite, so a test
+    that used it would be the first or second caller in the process and would
+    pass or fail depending on test order.
+
+    The global lives in `opentelemetry.metrics._internal` on current releases
+    and on the package itself on older ones, so the holder is looked up rather
+    than assumed - the earlier version read `metrics._METER_PROVIDER`
+    unconditionally, which raised `AttributeError` on 1.45 and only passed in a
+    full run because some other module happened to have set the attribute.
+    """
+
+    def setUp(self):
+        try:
+            from opentelemetry.sdk.metrics import MeterProvider
+            from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+        except ImportError:  # pragma: no cover - the sdk is a dev dependency
+            self.skipTest("opentelemetry-sdk is not installed")
+
+        from opentelemetry import metrics as metrics_api
+
+        from netverify import telemetry
+
+        self.telemetry = telemetry
+        self.holder = getattr(metrics_api, "_internal", metrics_api)
+        self._previous = self.holder._METER_PROVIDER  # noqa: SLF001
+        self.reader = self._install(MeterProvider, InMemoryMetricReader)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        self.holder._METER_PROVIDER = self._previous  # noqa: SLF001
+        self.telemetry.reset_instruments()
+
+    def _install(self, meter_provider_cls, reader_cls):
+        """Bind a fresh provider and return its reader.
+
+        Also drops the cached instruments, because an instrument created under
+        the previous provider records into the previous reader forever - which
+        is the whole reason the lazy creation exists.
+        """
+        reader = reader_cls()
+        self.holder._METER_PROVIDER = meter_provider_cls(metric_readers=[reader])  # noqa: SLF001
+        self.telemetry.reset_instruments()
+        return reader
+
+    def _points(self, name):
+        data = self.reader.get_metrics_data()
+        if data is None:
+            return []
+        return [
+            point
+            for resource in data.resource_metrics
+            for scope in resource.scope_metrics
+            for metric in scope.metrics
+            if metric.name == name
+            for point in metric.data.data_points
+        ]
+
+    def _series(self, name):
+        """One instrument as `{attributes: value}`, keyed by sorted pairs.
+
+        Counters only: a histogram point has a `sum`, not a `value`, so it is
+        skipped rather than silently counted as zero.
+        """
+        series = {}
+        for point in self._points(name):
+            value = getattr(point, "value", None)
+            if value is not None:
+                series[tuple(sorted(dict(point.attributes).items()))] = value
+        return series
+
+
+class TestMetricsAreRecorded(_MetricsCase):
+    def test_a_passing_verdict_is_counted_by_command_and_outcome(self):
+        from netverify import verify
+        from tests import fixtures as fx
+
+        verify("ping", fx.PING_OK, audit=None)
+
+        self.assertEqual(
+            self._series(self.telemetry.METRIC_VERDICTS),
+            {
+                (
+                    ("netverify.command.id", "ping"),
+                    ("netverify.verdict.outcome", "pass"),
+                ): 1
+            },
+        )
+
+    def test_a_failing_verdict_lands_in_its_own_series(self):
+        """Same command, different outcome label - a failure *rate*, not a count."""
+        from netverify import verify
+        from tests import fixtures as fx
+
+        verify("ping", fx.PING_OK, audit=None)
+        verify("ping", fx.PING_TOTAL_LOSS, audit=None)
+
+        series = self._series(self.telemetry.METRIC_VERDICTS)
+        self.assertEqual(
+            series[(("netverify.command.id", "ping"), ("netverify.verdict.outcome", "pass"))], 1
+        )
+        self.assertEqual(
+            series[(("netverify.command.id", "ping"), ("netverify.verdict.outcome", "fail"))], 1
+        )
+
+    def test_an_unparseable_capture_is_an_input_error_not_a_failure(self):
+        """Three outcomes, not two.
+
+        Collapsing `input_error` into `fail` is how a healthy backbone gets
+        reported as broken because one capture arrived truncated - and it is
+        the mistake an incident dashboard is most likely to make.
+        """
+        from netverify import verify
+        from tests import fixtures as fx
+
+        verify("frr_bgp_summary", fx.FRR_SUMMARY_MALFORMED, audit=None)
+
+        series = self._series(self.telemetry.METRIC_VERDICTS)
+        self.assertEqual(
+            series[
+                (
+                    ("netverify.command.id", "frr_bgp_summary"),
+                    ("netverify.verdict.outcome", "input_error"),
+                )
+            ],
+            1,
+        )
+
+    def test_call_duration_is_a_histogram_labelled_by_tool(self):
+        """A histogram, not a counter: the useful question is the distribution.
+
+        A running average of durations cannot answer "is p99 latency up", which
+        is the question during an incident.
+        """
+        self.telemetry.record_duration("verify_capture", 0.25)
+
+        points = self._points(self.telemetry.METRIC_CALL_DURATION)
+        self.assertEqual([point.count for point in points], [1])
+        self.assertAlmostEqual(points[0].sum, 0.25, places=6)
+        self.assertEqual(dict(points[0].attributes)["gen_ai.tool.name"], "verify_capture")
+
+
+class TestFindingMetricsAreRecorded(_MetricsCase):
+    """The differentiator: findings-by-kind is a security signal, not a perf one.
+
+    No generic MCP server has this metric, because no generic MCP server treats
+    its own tool output as untrusted. A fleet-wide spike in `verdict_coercion`
+    is someone attempting prompt injection against the infrastructure.
+    """
+
+    def _kind(self, kind, severity):
+        return (("netverify.finding.kind", kind), ("netverify.finding.severity", severity))
+
+    def test_a_credential_is_counted_by_kind_and_severity(self):
+        from netverify import sanitize
+        from tests import fixtures as fx
+
+        sanitize(fx.OUTPUT_WITH_SECRET)
+
+        self.assertEqual(
+            self._series(self.telemetry.METRIC_FINDINGS),
+            {self._kind("credential", "high"): 1},
+        )
+
+    def test_an_injection_attempt_is_counted_separately(self):
+        from netverify import sanitize
+        from tests import fixtures as fx
+
+        sanitize(fx.OUTPUT_WITH_INJECTION)
+
+        self.assertEqual(
+            self._series(self.telemetry.METRIC_FINDINGS),
+            {self._kind("verdict_coercion", "critical"): 1},
+        )
+
+    def test_a_clean_capture_records_nothing(self):
+        """A counter that ticks on every call measures nothing at all."""
+        from netverify import sanitize
+        from tests import fixtures as fx
+
+        sanitize(fx.PING_OK)
+
+        self.assertEqual(self._series(self.telemetry.METRIC_FINDINGS), {})
+
+    def test_sanitise_and_scan_do_not_double_count(self):
+        """`sanitize` calls `scan` internally, so recording in both would double.
+
+        The counter would then measure *how often the library was asked* times
+        two, which is not a number anyone can act on.
+        """
+        from netverify import sanitize
+        from tests import fixtures as fx
+
+        sanitize(fx.OUTPUT_WITH_SECRET)
+        once = sum(self._series(self.telemetry.METRIC_FINDINGS).values())
+        sanitize(fx.OUTPUT_WITH_SECRET)
+        twice = sum(self._series(self.telemetry.METRIC_FINDINGS).values())
+
+        self.assertEqual(once, 1)
+        self.assertEqual(twice, 2)
+
+
+class TestRefusalMetricsAreRecorded(_MetricsCase):
+    def test_a_refusal_is_counted_by_reason_and_command(self):
+        self.telemetry.record_refused(self.telemetry.REASON_NOT_IN_ALLOWLIST, command="ping")
+
+        self.assertEqual(
+            self._series(self.telemetry.METRIC_REFUSED),
+            {
+                (
+                    ("netverify.refusal.command", "ping"),
+                    ("netverify.refusal.reason", "not_in_allowlist"),
+                ): 1
+            },
+        )
+
+    def test_an_unattributable_refusal_is_its_own_series(self):
+        """A refusal we could not name is a question an operator asks.
+
+        Merging it into the labelled series would answer that question wrongly,
+        by making unattributed refusals invisible.
+        """
+        self.telemetry.record_refused(self.telemetry.REASON_BAD_ARGUMENT)
+
+        self.assertEqual(
+            self._series(self.telemetry.METRIC_REFUSED),
+            {(("netverify.refusal.reason", "bad_argument"),): 1},
+        )
+
+    def test_a_rate_limited_call_is_counted_with_its_tool(self):
+        self.telemetry.record_rate_limited("verify_capture")
+
+        self.assertEqual(
+            self._series(self.telemetry.METRIC_RATE_LIMITED),
+            {(("gen_ai.tool.name", "verify_capture"),): 1},
+        )
+
+    def test_status_lists_every_instrument(self):
+        from netverify import telemetry_status
+
+        listed = telemetry_status()["metrics"]
+        for name in (
+            self.telemetry.METRIC_VERDICTS,
+            self.telemetry.METRIC_FINDINGS,
+            self.telemetry.METRIC_CALL_DURATION,
+            self.telemetry.METRIC_RATE_LIMITED,
+            self.telemetry.METRIC_REFUSED,
+        ):
+            with self.subTest(metric=name):
+                self.assertIn(name, listed)
+
+    def test_reset_instruments_rebinds_to_a_later_provider(self):
+        """The lazy-creation claim, checked rather than assumed.
+
+        Instruments are cached, so a provider installed *after* the first
+        recording would receive nothing. `reset_instruments` is what makes that
+        case work, and nothing but tests ever calls it - without this test the
+        rebinding path would be code only tests could reach.
+        """
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        self.telemetry.record_refused(self.telemetry.REASON_BAD_ARGUMENT)
+        self.assertTrue(self._series(self.telemetry.METRIC_REFUSED))
+
+        second = self._install(MeterProvider, InMemoryMetricReader)
+        self.telemetry.record_refused(self.telemetry.REASON_BAD_ARGUMENT)
+
+        data = second.get_metrics_data()
+        recorded = [
+            point
+            for resource in data.resource_metrics
+            for scope in resource.scope_metrics
+            for metric in scope.metrics
+            if metric.name == self.telemetry.METRIC_REFUSED
+            for point in metric.data.data_points
+        ]
+        self.assertEqual([point.value for point in recorded], [1])
+
+    def test_a_broken_instrument_never_breaks_the_call_it_describes(self):
+        """Telemetry is best-effort by contract, so the failure is proven.
+
+        The realistic failure is an exporter that rejects a measurement - a full
+        buffer, a shutting-down collector. The verification result must survive
+        it: a metrics outage is not a reason to fail a client's health check.
+        """
+
+        class Exploding:
+            def add(self, *_args, **_kwargs):
+                raise RuntimeError("the collector went away")
+
+        self.telemetry._INSTRUMENTS[  # noqa: SLF001
+            self.telemetry.METRIC_REFUSED
+        ] = Exploding()
+        self.telemetry.record_refused(self.telemetry.REASON_BAD_ARGUMENT)
+        self.telemetry.record_duration("verify", 0.1)
+
+
+class TestInstrumentCreationIsThreadSafe(_MetricsCase):
+    """The lazy cache is shared mutable state on a threaded server.
+
+    The MCP SDK runs sync tools on worker threads, so two calls can reach
+    `_counter` for the first time at once. Without the lock they would each
+    create a counter and one thread's measurements would vanish; with it, the
+    first to arrive creates it and the rest reuse it. Either way this asserts
+    the outcome that matters - every recorded refusal is counted exactly once -
+    rather than the implementation.
+    """
+
+    def test_concurrent_first_use_counts_every_refusal_exactly_once(self):
+        import threading
+
+        self.telemetry.reset_instruments()
+        threads_count = 8
+        per_thread = 25
+        start = threading.Barrier(threads_count)
+
+        def record():
+            start.wait()
+            for _ in range(per_thread):
+                self.telemetry.record_refused(self.telemetry.REASON_BAD_ARGUMENT)
+
+        threads = [threading.Thread(target=record) for _ in range(threads_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        series = self._series(self.telemetry.METRIC_REFUSED)
+        self.assertEqual(sum(series.values()), threads_count * per_thread)
+
+    def test_only_one_instrument_survives_the_race(self):
+        import threading
+
+        self.telemetry.reset_instruments()
+        start = threading.Barrier(8)
+
+        def record():
+            start.wait()
+            self.telemetry.record_verdict("ping", "pass")
+
+        threads = [threading.Thread(target=record) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(self._series(self.telemetry.METRIC_VERDICTS)), 1)
+        self.assertEqual(len(self.telemetry._INSTRUMENTS), 1)  # noqa: SLF001
+
+
+class TestNoPayloadsInTelemetry(_MetricsCase):
+    """The payload promise in `telemetry.py`, checked rather than trusted.
+
+    Turning on an exporter moves data *out of the process* to a collector, so
+    "we never log payloads" stops being an internal convention and becomes a
+    property of what crosses a trust boundary. That is why the promise is
+    pinned here rather than left to a reviewer's memory: an edit that adds
+    `active.set_attribute("why", verdict.reasons[0])` would put device text
+    into a third party's storage, and no behavioural test would notice.
+
+    Two checks, because either alone is weak: a substring search catches the
+    secret but not an innocuous-looking line of device text, and a length bound
+    catches prose but would also reject a legitimate long value. The length
+    bound is generous enough for every fixed string this library emits - ids,
+    outcome enums, finding kinds, counts - and short enough that a sentence
+    cannot slip through.
+    """
+
+    #: Longest attribute value any of this library emits, in characters.
+    MAX_VALUE_LENGTH = 80
+
+    def setUp(self):
+        super().setUp()
+        try:
+            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+            from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+                InMemorySpanExporter,
+            )
+        except ImportError:  # pragma: no cover - the sdk is a dev dependency
+            self.skipTest("opentelemetry-sdk is not installed")
+
+        from opentelemetry import trace
+
+        self.exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(self.exporter))
+        self._previous_tracer_provider = trace._TRACER_PROVIDER  # noqa: SLF001
+        self._previous_tracer = self.telemetry._TRACER  # noqa: SLF001
+        trace._TRACER_PROVIDER = provider  # noqa: SLF001
+        self.telemetry._TRACER = provider.get_tracer(self.telemetry.TRACER_NAME)  # noqa: SLF001
+        self.addCleanup(self._restore_tracer)
+
+    def _restore_tracer(self):
+        from opentelemetry import trace
+
+        trace._TRACER_PROVIDER = self._previous_tracer_provider  # noqa: SLF001
+        self.telemetry._TRACER = self._previous_tracer  # noqa: SLF001
+
+    def _values(self):
+        """Every attribute value this library emitted, spans and metrics alike."""
+        for span in self.exporter.get_finished_spans():
+            if not span.name.startswith("netverify"):
+                continue
+            for value in (span.attributes or {}).values():
+                yield value
+        for point in self._all_points():
+            for value in dict(point.attributes).values():
+                yield value
+
+    def _all_points(self):
+        data = self.reader.get_metrics_data()
+        if data is None:
+            return
+        for resource in data.resource_metrics:
+            for scope in resource.scope_metrics:
+                for metric in scope.metrics:
+                    yield from metric.data.data_points
+
+    def test_no_attribute_carries_device_text(self):
+        from netverify import sanitize, verify
+        from tests import fixtures as fx
+
+        verify(
+            "srl_interface_brief",
+            fx.SRL_INTERFACE_UP_WITH_SECRET,
+            interface="ethernet-1/1",
+            audit=None,
+        )
+        sanitize(fx.OUTPUT_WITH_INJECTION)
+
+        values = list(self._values())
+        self.assertTrue(values, "nothing was recorded, so this would pass vacuously")
+        for value in values:
+            text = str(value)
+            with self.subTest(value=text[:40]):
+                self.assertNotIn("hunter2", text)
+                self.assertLessEqual(len(text), self.MAX_VALUE_LENGTH)
+
+    def test_the_finding_is_still_recorded_so_the_check_is_not_vacuous(self):
+        """A payload-free counter that records nothing also passes the test above.
+
+        So assert the counter really did fire, with the finding's *kind*: the
+        security signal survives, and only the payload is withheld.
+        """
+        from netverify import sanitize
+        from tests import fixtures as fx
+
+        sanitize(fx.OUTPUT_WITH_SECRET)
+
+        kinds = {
+            kind
+            for key in self._series(self.telemetry.METRIC_FINDINGS)
+            for name, kind in key
+            if name == "netverify.finding.kind"
+        }
+        self.assertEqual(kinds, {"credential"})
+
+
 if __name__ == "__main__":
     unittest.main()

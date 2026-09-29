@@ -28,14 +28,20 @@ which is why nothing here holds per-session data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import time
+import warnings
 from typing import Annotated, Any
 
+import anyio.from_thread
+from mcp.server.caching import CacheHint
 from mcp.server.context import CallNext, ServerMiddleware, ServerRequestContext
+from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp_types import ToolAnnotations
+from mcp_types.methods import CacheableMethod
 
 from netverify import (
     COMMANDS,
@@ -54,7 +60,20 @@ from netverify import (
 )
 from netverify.audit import DEFAULT as AUDIT
 from netverify.context import bind_request_id
-from netverify.errors import RateLimited, ScopeError
+from netverify.errors import (
+    REASON_BAD_ARGUMENT,
+    REASON_MISSING_ARGUMENT,
+    REASON_NON_LIST_BATCH,
+    REASON_NOT_IN_ALLOWLIST,
+    REASON_OVERSIZE_BATCH,
+    REASON_OVERSIZE_OUTPUT,
+    REASON_RATE_LIMITED,
+    REASON_UNKNOWN_ARGUMENT,
+    RateLimited,
+    ScopeError,
+)
+from netverify.telemetry import record_duration, record_rate_limited, record_refused
+from netverify.verify import ProgressFn
 
 from .prompts import register as register_prompts
 from .skills import SKILL_SCHEME, Skill, SkillsExtension, load_skills
@@ -88,6 +107,47 @@ SERVER_VERSION = "1.2.0"
 #: refill is what punishes a loop, and at 10 tokens/second that is unchanged.
 BUCKET_CAPACITY = 2 * MAX_BATCH_ITEMS
 BUCKET_REFILL_PER_SECOND = 10.0
+
+#: Freshness hints for the cacheable methods (SEP-2549). A client may reuse a
+#: cached result for `ttl_ms`; `scope="public"` additionally allows sharing it
+#: across authorization contexts.
+#:
+#: Why these six and not `tools/call`: every method listed here returns a pure
+#: function of this process's own source - the registry, the schemas, the prose -
+#: and none of them takes a caller's data. `tools/call` does take caller data and
+#: is not even in the cacheable set, so the question of caching a verdict never
+#: arises; refusing to volunteer a hint for it is therefore not a judgement
+#: about a verdict's freshness.
+#:
+#: Why the TTL is finite rather than "forever": the protocol has no eternal
+#: value, and a client that treats a hint as permanent would keep serving
+#: `netverify://commands/{id}` after the process was replaced by a newer
+#: version. Five minutes is long enough to absorb an agent's re-reads within a
+#: session and short enough that a restarted server is picked up without
+#: operator intervention.
+#:
+#: `scope="public"` is the whole point of declaring these at all. This server
+#: holds no credentials and no per-session state, so the same bytes are correct
+#: for every caller, and a shared cache may serve them without leaking anything
+#: about who asked.
+#:
+#: The keys are `CacheableMethod` *values* - a `Literal` of method names, not an
+#: enum, so they are written as the strings they are. The SDK's
+#: `validate_cache_hints` rejects anything else at construction, which is the
+#: behaviour worth having: a typo here would otherwise be a hint that silently
+#: applies to nothing.
+CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
+    "tools/list": CacheHint(ttl_ms=300_000, scope="public"),
+    "resources/list": CacheHint(ttl_ms=300_000, scope="public"),
+    "resources/templates/list": CacheHint(ttl_ms=300_000, scope="public"),
+    "prompts/list": CacheHint(ttl_ms=300_000, scope="public"),
+    "server/discover": CacheHint(ttl_ms=300_000, scope="public"),
+    # `resources/read` covers the static docs *and* the skill, which is read
+    # from disk at startup. Both are fixed for the life of the process, which is
+    # the property the hint is asserting; a skill edited underneath a running
+    # server is picked up by the restart that a redeploy implies anyway.
+    "resources/read": CacheHint(ttl_ms=300_000, scope="public"),
+}
 
 BUCKET = TokenBucket(BUCKET_CAPACITY, BUCKET_REFILL_PER_SECOND)
 
@@ -135,7 +195,7 @@ def _command_id_list() -> str:
     return "\n".join(f"  {spec.id} - {spec.summary}" for spec in COMMANDS)
 
 
-def _charge(cost: float = 1.0) -> None:
+def _charge(cost: float = 1.0, *, tool: str | None = None) -> None:
     """Consume request budget, or refuse.
 
     A batch call is charged proportionally to its size rather than as a single
@@ -147,9 +207,39 @@ def _charge(cost: float = 1.0) -> None:
         BUCKET.consume(cost)
     except RateLimited as exc:
         AUDIT.record("rate_limited", detail=str(exc))
+        record_rate_limited(tool)
+        # The reason comes from the exception rather than a literal here, so
+        # the library stays the single definition of the vocabulary. No command
+        # label: a budget refusal is about the caller, not about one of the
+        # registered ids, and `record_rate_limited` already carries the tool.
+        record_refused(exc.reason or REASON_RATE_LIMITED)
         # A tool error, not a crash: the message states how long to wait, which
         # is what lets an agent back off instead of retrying into the same wall.
         raise ToolError(str(exc)) from exc
+
+
+def _refuse(exc: ScopeError, *, tool: str | None = None) -> ToolError:
+    """Translate a library refusal into a tool error, and count it by reason.
+
+    Every refusal path funnels through here so the `netverify.refused` counter
+    sees the stable `reason` the ScopeError carries rather than prose. A bare
+    ScopeError with no reason (constructed by a test, or by code predating the
+    counter) is recorded as `bad_argument` rather than dropped - an uncounted
+    refusal is a blind spot, and the generic bucket is honest about that.
+
+    The `command` label is the exception's, not the adapter's. An earlier
+    version passed the *tool* name through the same attribute, which read as a
+    command id on a dashboard - two vocabularies in one column, and
+    `netverify.refusal.command=verify_capture` next to
+    `netverify.command.id=srl_interface_brief` is how a panel starts lying.
+    `tool` is still accepted for the audit line, which is prose and can say
+    both.
+    """
+    command = getattr(exc, "command", None)
+    message = str(exc)
+    AUDIT.record("refused", tool=tool, detail=message)
+    record_refused(exc.reason or REASON_BAD_ARGUMENT, command=command)
+    return ToolError(message)
 
 
 def verify_network_output(
@@ -188,7 +278,7 @@ def verify_network_output(
         ValueError: out-of-scope command, bad or missing argument, oversize
             output, or an exhausted request budget.
     """
-    _charge()
+    _charge(tool="verify_network_output")
     arguments = {
         name: value
         for name, value in (
@@ -200,6 +290,7 @@ def verify_network_output(
         )
         if value is not None
     }
+    started = time.perf_counter()
     try:
         verdict = verify(command, output, audit=AUDIT, **arguments)
     except ScopeError as exc:
@@ -215,7 +306,12 @@ def verify_network_output(
             command_id=command if isinstance(command, str) else None,
             detail=str(exc),
         )
+        record_refused(
+            exc.reason or REASON_BAD_ARGUMENT,
+            command=command if isinstance(command, str) else "verify_network_output",
+        )
         raise ToolError(str(exc)) from exc
+    record_duration("verify_network_output", time.perf_counter() - started)
     return verdict.to_dict()
 
 
@@ -235,13 +331,15 @@ def sanitize_device_output(output: str) -> dict[str, Any]:
         non-empty `findings` list as a security signal about the device, not a
         formatting complaint.
     """
-    _charge()
+    _charge(tool="sanitize_device_output")
+    started = time.perf_counter()
     report = sanitize(output)
     AUDIT.record(
         "sanitize",
         findings=len(report.findings),
         truncated=report.truncated,
     )
+    record_duration("sanitize_device_output", time.perf_counter() - started)
     return report.to_dict()
 
 
@@ -259,10 +357,12 @@ def audit_device_output(output: str) -> dict[str, Any]:
         {findings, count, severities, highest_severity} - no text is returned,
         so this is safe to call on anything.
     """
-    _charge()
+    _charge(tool="audit_device_output")
+    started = time.perf_counter()
     findings = scan(output)
     severities = sorted({f.severity for f in findings})
     AUDIT.record("audit_scan", findings=len(findings))
+    record_duration("audit_device_output", time.perf_counter() - started)
     return {
         "findings": [f.to_dict() for f in findings],
         "count": len(findings),
@@ -296,7 +396,92 @@ def _check_batch(commands: Any, label: str = "commands") -> None:
         )
 
 
-def verify_capture(commands: list[dict[str, Any]]) -> dict[str, Any]:
+async def _no_op() -> int:
+    """A coroutine that does nothing, used to probe which bridge is available."""
+    return 1
+
+
+def _resolve_bridge() -> bool:
+    """Whether an anyio host loop is reachable from here.
+
+    Probed by *doing the thing* rather than by asking a flag, because the honest
+    signal is the attempt itself: `anyio.from_thread.run` raises
+    `NoEventLoopError` off a worker thread, and `current_token()` is no help (it
+    raises in both cases). One no-op round trip per batch, and only when there is
+    a context to report to.
+
+    Returns True for the anyio trampoline, False for `asyncio.run`.
+    """
+
+    with warnings.catch_warnings():
+        # anyio builds the coroutine before it checks whether a host loop is
+        # reachable, so the failing path leaves an un-awaited coroutine behind and
+        # CPython warns about it. That warning is about the probe, not about the
+        # server, and a clean run should stay clean.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        try:
+            anyio.from_thread.run(_no_op)
+        except Exception:  # noqa: BLE001 - any failure means "use the other bridge"
+            return False
+    return True
+
+
+def _progress_reporter(ctx: Context[Any, Any] | None, total: int) -> ProgressFn | None:
+    """Adapt the SDK's async progress channel to the library's sync callback.
+
+    The mismatch is real and worth spelling out. `ctx.report_progress` is a
+    coroutine, so it needs an event loop. `verify_capture` is a *sync* tool, so
+    the SDK runs it on a worker thread (`anyio.to_thread.run_sync`) where no loop
+    is running - and the library may not supply one, because it does not import
+    `asyncio`, which `integrity.py` lists as network-capable for a verifier with
+    no route to the device.
+
+    Two bridges, and which one is used is settled once per batch:
+
+    - **Under the SDK**: anyio's thread trampoline hands the coroutine back to
+      the loop that owns this call and blocks the worker until it finishes.
+      Blocking is the point. Firing and moving on would let the *result* reach
+      the client after the last progress update, so a client rendering "12/200"
+      under a finished answer looks broken. The call is `from_thread.run`, not
+      `run_sync`: the latter hands back the coroutine un-awaited in this
+      anyio version, which looks like success and reports nothing at all.
+    - **Called directly**: there is no host loop, so the coroutine runs on a
+      throwaway one of our own. Same ordering guarantee, and it means the
+      notification path is exercised by the test suite rather than only in
+      production.
+
+    Returns None when there is no context, which the library reads as "do not
+    report", so the no-caller case costs one comparison per entry.
+    """
+    if ctx is None:
+        return None
+
+    bridged: list[bool] = []
+
+    def report(done: int, count: int) -> None:
+        async def notify() -> None:
+            await ctx.report_progress(done, count, f"verified {done}/{count}")
+
+        if not bridged:
+            bridged.append(_resolve_bridge())
+        try:
+            if bridged[0]:
+                anyio.from_thread.run(notify)
+            else:
+                asyncio.run(notify())
+        except Exception:  # noqa: BLE001,S110 - progress must not break the batch
+            # Swallowed here rather than in the library because here is where the
+            # loop is: a notification that fails because the client hung up
+            # mid-batch is not a reason to fail the remaining 180 verifications.
+            pass
+
+    return report
+
+
+def verify_capture(
+    commands: list[dict[str, Any]],
+    ctx: Context[Any, Any] | None = None,
+) -> dict[str, Any]:
     """Verify many captured command outputs at once.
 
     For an incident or a pre-change check, where the question is "what is the
@@ -304,9 +489,18 @@ def verify_capture(commands: list[dict[str, Any]]) -> dict[str, Any]:
     does not abort the batch: each input gets a result in place, so a rejected
     entry is identifiable rather than fatal.
 
+    A 200-entry batch is the one call here long enough that a client cannot tell
+    it from a hang, so it reports progress when the caller asked for it. The
+    `ctx` annotation is what the SDK looks for: `find_context_parameter`
+    resolves type hints and injects the request context, which is `None` when
+    the function is called directly (tests, the REPL), where there is nobody to
+    notify.
+
     Args:
         commands: List of {command, output, ...arguments} objects, at most
             `MAX_BATCH_ITEMS` of them.
+        ctx: The MCP request context, injected by the SDK. Used only for
+            progress notifications.
 
     Returns:
         {results, ok_count, failed_count, refused_count} where each result is
@@ -322,10 +516,10 @@ def verify_capture(commands: list[dict[str, Any]]) -> dict[str, Any]:
     # exists to close. Verified with the 200-item cap above, the worst case is
     # now 200 tokens, so a runaway loop still exhausts the bucket and gets told
     # to back off.
-    _charge(cost=float(max(1, len(commands))))
+    _charge(cost=float(max(1, len(commands))), tool="verify_capture")
 
     started = time.perf_counter()
-    raw = verify_many(commands, audit=AUDIT)
+    raw = verify_many(commands, audit=AUDIT, progress=_progress_reporter(ctx, len(commands)))
 
     results: list[dict[str, Any]] = []
     ok_count = failed_count = refused_count = 0
@@ -333,6 +527,17 @@ def verify_capture(commands: list[dict[str, Any]]) -> dict[str, Any]:
         if isinstance(item, Exception):
             refused_count += 1
             results.append({"refused": str(item)})
+            # Counted per entry, not per batch: a batch that refused 190 of 200
+            # entries is a different operational signal from one that refused
+            # one, and a per-call counter would flatten the difference. Reason
+            # and command come off the exception, so an entry refused for a
+            # bad `interface` argument is attributed to that command rather than
+            # to the batch tool. A ValueError from deep in a parser carries
+            # neither, and lands in `bad_argument` rather than in a blind spot.
+            record_refused(
+                getattr(item, "reason", None) or REASON_BAD_ARGUMENT,
+                command=getattr(item, "command", None),
+            )
         elif item.ok:
             ok_count += 1
             results.append(item.to_dict())
@@ -340,12 +545,14 @@ def verify_capture(commands: list[dict[str, Any]]) -> dict[str, Any]:
             failed_count += 1
             results.append(item.to_dict())
 
+    duration_s = time.perf_counter() - started
     AUDIT.record(
         "verify_capture",
         ok=ok_count == len(results),
-        duration_ms=(time.perf_counter() - started) * 1000,
+        duration_ms=duration_s * 1000,
         detail=f"ok={ok_count} failed={failed_count} refused={refused_count}",
     )
+    record_duration("verify_capture", duration_s)
     return {
         "results": results,
         "ok_count": ok_count,
@@ -565,6 +772,11 @@ def build_server() -> Any:
         # afterwards, because the SDK validates extension identifiers when it
         # applies them and a hand-mutated list would skip that check.
         extensions=[SkillsExtension()],
+        # SEP-2549 freshness hints. Passed to the constructor because the SDK
+        # validates the keys there and fills the hints in per result, so
+        # post-hoc mutation would either be rejected or silently apply to some
+        # methods only. See CACHE_HINTS for why these six and not the others.
+        cache_hints=CACHE_HINTS,
     )
 
     server.add_tool(
@@ -675,6 +887,79 @@ def build_server() -> Any:
         mime_type="application/json",
     )
     def _errors() -> str:
+        # One list, two views. `when` is the message fragment an agent can match
+        # against prose it already holds; `reason` is the stable code the library
+        # attaches to every refusal, which is what a client should branch on -
+        # English messages are reworded, codes are not. The `reasons` map is
+        # derived from the same list, so a code cannot be documented in one place
+        # and contradicted in the other.
+        categories = [
+            {
+                "reason": REASON_NOT_IN_ALLOWLIST,
+                "when": "command is not in the allowlist",
+                "cause": "Free-form CLI text, or a command that would write.",
+                "fix": "Use one of the registered command ids.",
+                "retryable": False,
+            },
+            {
+                "reason": REASON_OVERSIZE_OUTPUT,
+                "when": "output exceeds the size cap",
+                "cause": "More than 64 KiB of device text.",
+                "fix": "Send only the relevant command's output.",
+                "retryable": False,
+            },
+            {
+                "reason": REASON_MISSING_ARGUMENT,
+                "when": "requires argument(s)",
+                "cause": "A required argument was missing or empty.",
+                "fix": "Supply the argument the refusal names.",
+                "retryable": False,
+            },
+            {
+                "reason": REASON_UNKNOWN_ARGUMENT,
+                "when": "does not accept argument(s)",
+                "cause": "An argument that is valid for another command.",
+                "fix": "Use only the arguments the refusal lists.",
+                "retryable": False,
+            },
+            {
+                # One code for every shape failure: a non-string argument, a
+                # newline in one, an out-of-range address. They share a fix
+                # ("send a value of the declared shape"), and a dashboard that
+                # split them would be reading a distinction the caller cannot
+                # act on differently.
+                "reason": REASON_BAD_ARGUMENT,
+                "when": "not a valid prefix / interface / peer_ip",
+                "cause": "An argument failed its declared shape.",
+                "fix": (
+                    "prefix must be IPv4 CIDR; peer_ip and "
+                    "neighbor_router_id a dotted-quad; interface a plain "
+                    "device name."
+                ),
+                "retryable": False,
+            },
+            {
+                "reason": REASON_RATE_LIMITED,
+                "when": "request budget exhausted",
+                "cause": "Rate limit; the refusal states the wait.",
+                "fix": "Wait the stated interval, then retry once.",
+                "retryable": True,
+            },
+            {
+                "reason": REASON_OVERSIZE_BATCH,
+                "when": "above the item limit (batch)",
+                "cause": "A batch exceeded the item cap.",
+                "fix": "Split into several calls.",
+                "retryable": False,
+            },
+            {
+                "reason": REASON_NON_LIST_BATCH,
+                "when": "expected a list of captures",
+                "cause": "A batch argument that was a single object, not a list.",
+                "fix": "Wrap it in a list, even for one entry.",
+                "retryable": False,
+            },
+        ]
         return json.dumps(
             {
                 "principle": (
@@ -683,54 +968,19 @@ def build_server() -> Any:
                     "refusal raises and says what to change. Do not report a "
                     "refusal as a device fault."
                 ),
-                "categories": [
-                    {
-                        "when": "command is not in the allowlist",
-                        "cause": "Free-form CLI text, or a command that would write.",
-                        "fix": "Use one of the registered command ids.",
-                        "retryable": False,
-                    },
-                    {
-                        "when": "output exceeds the size cap",
-                        "cause": "More than 64 KiB of device text.",
-                        "fix": "Send only the relevant command's output.",
-                        "retryable": False,
-                    },
-                    {
-                        "when": "requires argument(s)",
-                        "cause": "A required argument was missing or empty.",
-                        "fix": "Supply the argument the refusal names.",
-                        "retryable": False,
-                    },
-                    {
-                        "when": "does not accept argument(s)",
-                        "cause": "An argument that is valid for another command.",
-                        "fix": "Use only the arguments the refusal lists.",
-                        "retryable": False,
-                    },
-                    {
-                        "when": "not a valid prefix / interface / peer_ip",
-                        "cause": "An argument failed its declared shape.",
-                        "fix": (
-                            "prefix must be IPv4 CIDR; peer_ip and "
-                            "neighbor_router_id a dotted-quad; interface a plain "
-                            "device name."
-                        ),
-                        "retryable": False,
-                    },
-                    {
-                        "when": "request budget exhausted",
-                        "cause": "Rate limit; the refusal states the wait.",
-                        "fix": "Wait the stated interval, then retry once.",
-                        "retryable": True,
-                    },
-                    {
-                        "when": "above the item limit (batch)",
-                        "cause": "A batch exceeded the item cap.",
-                        "fix": "Split into several calls.",
-                        "retryable": False,
-                    },
-                ],
+                "reason_vocabulary": (
+                    "Every refusal carries a stable `reason` code from `reasons` "
+                    "below, and a `command` id when the id was already in the "
+                    "allowlist. Branch on the code, not on the message."
+                ),
+                "categories": categories,
+                "reasons": {
+                    category["reason"]: {
+                        "fix": category["fix"],
+                        "retryable": category["retryable"],
+                    }
+                    for category in categories
+                },
                 "outcomes": {
                     "pass": "The check held.",
                     "fail": "The network failed a check. This is a real fault.",

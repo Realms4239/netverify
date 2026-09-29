@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -148,8 +149,12 @@ def main() -> int:
         print()
         print("=== 4. run the INSTALLED package, outside the repository ===")
         # Copied beside the probe: it is imported by the clean interpreter, so it
-        # must not be shadowed by this checkout's copy.
-        (work / "wheel_probe.py").write_text(wheel_probe.PROBE, encoding="utf-8")
+        # must not be shadowed by this checkout's copy. The *file* is copied, not
+        # a string it holds: an earlier version wrote `wheel_probe.PROBE`, a
+        # pre-refactor blob that had no `main`, so the clean interpreter imported
+        # a module with nothing to call and the gate failed with an
+        # AttributeError that had nothing to do with the wheel.
+        shutil.copyfile(pathlib.Path(wheel_probe.__file__), work / "wheel_probe.py")
         (work / "probe.py").write_text("import wheel_probe\nwheel_probe.main()\n", encoding="utf-8")
         result = _run([str(exe), str(work / "probe.py")], cwd=work)
         print(result.stdout.rstrip())

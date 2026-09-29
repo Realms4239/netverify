@@ -21,10 +21,10 @@ credentials, opens no sockets, and cannot mutate a device. Version 1.2.0.
 
 ## Verified state
 
-Full gate set green as of `90a1a99`:
+Full gate set green as of `90a1a99`, plus the instrumentation cycle below:
 
 ```
-251 tests · 46/46 evals · ruff check · ruff format · bandit -ll ·
+320 tests · 46/46 evals · ruff check · ruff format · bandit -ll ·
 zero-dependency · mutation 10/10 · smoke · parity · stdio · wheel-install
 ```
 
@@ -36,18 +36,53 @@ re-implementing anything here.
 | # | Item | Status | Evidence |
 |---|---|---|---|
 | 1 | Agent Skill (SEP-2640) | **DONE** | `skills/triage-backbone/SKILL.md`, `server/skills.py`, `tests/test_skills.py` |
-| 2 | Adversarial finding counters | **NOT DONE** | `telemetry.py` has spans only — no `Counter`/`Histogram` anywhere |
-| 3 | Progress notifications on `verify_capture` | **NOT DONE** | no `report_progress` in `server/` |
-| 4a | `cache_hints` | **NOT DONE** | not passed to `MCPServer(...)` |
-| 4b | "no payloads in telemetry" test | **PARTIAL** | guard exists for the *audit log* only (`tests/test_limits_audit.py:89`); **no guard on telemetry spans** |
-| 5 | Aggregate metrics | **NOT DONE** | no metrics at all — see below |
+| 2 | Adversarial finding counters | **DONE** | `telemetry.record_findings`, called from `sanitize.scan`; `tests/test_telemetry.py` |
+| 3 | Progress notifications on `verify_capture` | **DONE** | `verify_many(progress=...)`, `server/app.py:_progress_reporter`, `tests/test_protocol_extensions.py` |
+| 4a | `cache_hints` | **DONE** | `server/app.py:CACHE_HINTS`, passed to `MCPServer(...)`; `tests/test_protocol_extensions.py` |
+| 4b | "no payloads in telemetry" test | **DONE** | `tests/test_telemetry_payloads.py` (spans *and* metrics) |
+| 5 | Aggregate metrics | **DONE** | `telemetry.record_verdict/record_findings/record_duration/record_rate_limited/record_refused` |
 | — | Prompts (found in review) | **DONE** | `server/prompts.py`, `tests/test_prompts.py` |
 | — | Batch size cap (found in review) | **DONE** | `MAX_BATCH_ITEMS`; burst derived from it |
+| — | Stable refusal codes (found in review) | **DONE** | `errors.REASON_*`, `ScopeError.reason`/`.command`; `tests/test_refusal_reasons.py` |
+| — | Thread safety for global state (found in review) | **DONE** | locks in `TokenBucket` and `AuditLog`; `tests/test_limits_audit.py` |
 
-**Metrics are the single biggest gap.** `netverify/telemetry.py` currently emits
-*spans only* (`span()`, `configure_from_env()`, `status()`). Every one of items
-2, 4a and 5 lands in that one module, and the tracer provider is already
-configured — so this is instrumentation work, not a plumbing project.
+### Three design points worth not undoing
+
+**The library cannot import `asyncio`.** `integrity.py` lists it among the
+network-capable modules — it *can* open a socket. So `verify_many` takes a
+**plain sync callback** (`ProgressFn`), and the only coroutine in the feature
+lives in the server adapter, which bridges to a loop. Two bridges, because the
+call shape differs: under the SDK, `anyio.from_thread.run` hands the coroutine
+back to the owning loop and blocks the worker; called directly (tests, REPL),
+there is no host loop, so it runs on a throwaway one. Use `from_thread.run`,
+**not** `run_sync` — the latter returns the coroutine un-awaited in this anyio
+version, which looks like success and reports nothing.
+
+**Refusal labels must stay bounded.** `ScopeError.command` is set only once the
+id is known to be in the allowlist. For `not_in_allowlist` the id is whatever
+the caller invented, and labelling with it lets an attacker mint a metric series
+per request. The test for that is in `tests/test_refusal_reasons.py`.
+
+**`CACHE_HINTS` keys are `Literal` strings, not enum members.** `CacheableMethod`
+is a `Literal` of method names; `CacheableMethod.TOOLS_LIST` raises
+`AttributeError` at import. The SDK validates keys at construction, so a typo
+would otherwise be a hint that silently applies to nothing.
+
+## Next work
+
+1. **Nothing is in flight from this cycle.** All five requested items are done
+   and gated; commit before starting anything new.
+2. Scratch files `mut.txt`, `o*.txt`, `pid.txt` in the repo root are runner
+   output, not source. Do not commit them.
+3. If progress notifications are ever extended to another tool, the two bridges
+   in `_progress_reporter` are the reusable part; do not move that logic into
+   the library.
+
+## Previously-planned work (superseded)
+
+Items 1–5 are done; the detail below is kept only to show what was planned.
+`netverify/telemetry.py` previously emitted *spans only*; it now emits
+counters and histograms as well.
 
 ## Next work, in order
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from typing import Any, TextIO
 
@@ -78,6 +79,12 @@ class AuditLog:
     ) -> None:
         self._sink = sink if sink is not None else _default_sink()
         self._clock = clock
+        # The server reuses one process-wide log across worker threads, and
+        # two `write` calls interleaving produce one merged JSON line that is
+        # half of each record - unparseable, and silently lost. A lock makes
+        # each line atomic; the sink write is already short, so the cost is
+        # negligible and the alternative is a corrupted audit trail.
+        self._lock = threading.Lock()
         self.enabled = _default_enabled() if enabled is None else enabled
 
     def record(
@@ -125,8 +132,10 @@ class AuditLog:
             if value is not None:
                 entry[key] = value
         try:
-            self._sink.write(json.dumps(entry, sort_keys=True) + "\n")
-            self._sink.flush()
+            line = json.dumps(entry, sort_keys=True) + "\n"
+            with self._lock:
+                self._sink.write(line)
+                self._sink.flush()
         except Exception as exc:  # noqa: BLE001
             # A logging failure must not take down the tool call it describes,
             # so it is caught - but not swallowed. Silently dropping an audit

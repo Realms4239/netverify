@@ -13,9 +13,16 @@ Requiring `site-packages` in the resolved path turns that silent pass into a
 failure.
 
 Note there are no imports at module level here: everything the probe needs is
-imported inside `PROBE`, which is `exec`'d in a fresh namespace. Declaring them
-outside would import the *checker's* copy of the stdlib path handling and, worse,
-invite a reader to assume the module body runs in the clean environment.
+imported inside `main`, which the clean interpreter calls after importing this
+file. Declaring them outside would import the *checker's* copy of the stdlib path
+handling and, worse, invite a reader to assume the module body runs in the clean
+environment.
+
+The `PROBE` string below is a **vestigial duplicate** of that logic, left from
+before this file became a real module. `check_wheel_install.py` used to write it
+into the temporary directory; it now copies this file, because a copy that
+defines `main` cannot drift from the module it was copied from - and this one
+had, silently costing a gate run. Delete it once nothing references it.
 """
 
 from __future__ import annotations

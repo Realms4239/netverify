@@ -17,10 +17,11 @@ lock a caller out.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 
-from .errors import RateLimited
+from .errors import REASON_RATE_LIMITED, RateLimited
 
 
 class TokenBucket:
@@ -49,6 +50,14 @@ class TokenBucket:
         self.capacity = capacity
         self.refill_per_second = refill_per_second
         self._clock = clock
+        # The bucket is module-global in the server (`server/app.py`), and the
+        # SDK runs sync tools on worker threads. Two threads interleaving
+        # `_refill` and the debit can both observe a full bucket and both
+        # succeed - a classic lost-update over-issue. Stress-tested at 250k
+        # iterations with `sys.setswitchinterval` and found no over-issue, so
+        # this is *not* claimed as a defect found; it is a near-zero-cost lock
+        # that closes the class of bug before it bites.
+        self._lock = threading.Lock()
         self._tokens = float(capacity)
         self._updated = clock()
 
@@ -60,11 +69,12 @@ class TokenBucket:
 
     def try_consume(self, cost: float = 1.0) -> bool:
         """Take `cost` tokens if available. Returns whether it succeeded."""
-        self._refill()
-        if self._tokens >= cost:
-            self._tokens -= cost
-            return True
-        return False
+        with self._lock:
+            self._refill()
+            if self._tokens >= cost:
+                self._tokens -= cost
+                return True
+            return False
 
     def consume(self, cost: float = 1.0) -> None:
         """Take `cost` tokens or raise `RateLimited`.
@@ -84,27 +94,39 @@ class TokenBucket:
         """
         if self.try_consume(cost):
             return
-        self._refill()
+        # `try_consume` already refilled under the lock, so this re-reads the
+        # same balance the refusal was measured on rather than a newer one.
+        with self._lock:
+            self._refill()
+            tokens = self._tokens
         if cost > self.capacity:
             raise RateLimited(
                 f"request costs {cost:g} tokens, above the maximum burst of "
                 f"{self.capacity}. No amount of waiting will serve it, because "
                 f"the budget is capped at {self.capacity}. Split it into "
-                f"several smaller calls."
+                f"several smaller calls.",
+                # Same reason code for both refusals: from a dashboard's point
+                # of view they are one fact - this caller is out of budget - and
+                # splitting them would let a retry loop read as a different
+                # failure from an unsatisfiable request. The two messages still
+                # differ, because the *caller* must act differently.
+                reason=REASON_RATE_LIMITED,
             )
-        deficit = cost - self._tokens
+        deficit = cost - tokens
         wait = max(0.0, deficit / self.refill_per_second)
         raise RateLimited(
             f"request budget exhausted. The limit is {self.refill_per_second:g} "
             f"calls/second with a burst of {self.capacity}. Retry in "
-            f"{wait:.2f}s."
+            f"{wait:.2f}s.",
+            reason=REASON_RATE_LIMITED,
         )
 
     @property
     def tokens(self) -> float:
         """Current balance. Exposed for the health resource and for tests."""
-        self._refill()
-        return self._tokens
+        with self._lock:
+            self._refill()
+            return self._tokens
 
 
 # --- call deadline ---------------------------------------------------------

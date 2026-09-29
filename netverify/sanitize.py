@@ -37,6 +37,7 @@ import unicodedata
 from functools import partial
 
 from .models import Finding, SanitizeReport
+from .telemetry import record_findings
 
 #: Hard cap on text a caller may submit or receive. 64 KiB is far above any
 #: real `show` command and far below what would meaningfully crowd a context.
@@ -446,7 +447,13 @@ def scan(text: str, *, max_bytes: int = MAX_BYTES) -> tuple[Finding, ...]:
                 )
             )
     # Stable order so two runs over the same text produce identical reports.
-    return tuple(sorted(findings, key=lambda f: (f.offset, f.kind)))
+    # Recorded here, not in `sanitize` below: `sanitize` calls `scan`
+    # internally, so recording in both would double-count every finding.
+    # Attributes are kind/severity only - descriptions are fixed per kind and
+    # matched text never leaves this module.
+    found = tuple(sorted(findings, key=lambda f: (f.offset, f.kind)))
+    record_findings(found)
+    return found
 
 
 def sanitize(text: str, *, max_bytes: int = MAX_BYTES) -> SanitizeReport:
