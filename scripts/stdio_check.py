@@ -34,6 +34,10 @@ import sys
 PROTOCOL_VERSION = "2026-07-28"
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+#: Real output from the `ping` checker, inlined rather than imported: this script
+#: runs against a *subprocess* server and must not depend on the test tree.
+PING_OK = "3 packets transmitted, 3 received, 0% packet loss"
+
 #: The client identity the 2026-07-28 revision expects on every request, in
 #: `_meta`. Version negotiation moved out of the `initialize` handshake and into
 #: per-request metadata, so a server that only understands the old handshake
@@ -187,6 +191,84 @@ def main() -> int:
             elif "sanitize_device_output" not in text:
                 failures.append("the served skill lost its sanitise-first instruction")
 
+        # Progress notifications, over the real wire, with a real token. This has
+        # to live here for the same reason the audit correlation below does: the
+        # unit tests drive the tool function and the SDK's worker thread, but
+        # neither proves a `notifications/progress` message is ever *written to
+        # stdout*. A server that computes progress and never sends it looks
+        # identical from the inside, and the client sees a silent connection.
+        process.stdin.write(
+            _frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 78,
+                    "method": "tools/call",
+                    "params": {
+                        "_meta": {**CLIENT_META, "progressToken": "batch-1"},
+                        "name": "verify_capture",
+                        "arguments": {
+                            # Real ping text, not a plausible-looking placeholder: a
+                            # fixture the checker cannot parse would make this a test
+                            # of the fixture rather than of progress.
+                            "commands": [
+                                {"command": "ping", "output": PING_OK},
+                                {"command": "ping", "output": PING_OK},
+                                {"command": "ping", "output": PING_OK},
+                            ]
+                        },
+                    },
+                }
+            )
+        )
+        process.stdin.flush()
+
+        # Read until the response for this id, collecting the notifications that
+        # arrive first. This is also the ordering assertion: the loop only stops
+        # at the result, so anything in `progress_seen` provably preceded it. A
+        # client rendering "3/3" under an answer that already arrived looks
+        # broken, and that is what a fire-and-forget bridge produces.
+        progress_seen: list[dict] = []
+        batch_result = None
+        for _ in range(24):  # bounded: 3 notifications + the response, with slack
+            line = process.stdout.readline()
+            if not line:
+                break
+            try:
+                message = json.loads(line.decode("utf-8"))
+            except json.JSONDecodeError:
+                failures.append(f"stdout carried non-JSON during a batch: {line[:200]!r}")
+                break
+            if message.get("id") == 78:
+                batch_result = message
+                break
+            if message.get("method") == "notifications/progress":
+                progress_seen.append(message.get("params") or {})
+
+        if batch_result is None:
+            failures.append("verify_capture produced no response when given a progress token")
+        elif batch_result.get("result", {}).get("structuredContent", {}).get("ok_count") != 3:
+            failures.append(
+                "verify_capture did not verify all three entries: "
+                f"{batch_result.get('result', {}).get('structuredContent')}"
+            )
+
+        if len(progress_seen) != 3:
+            failures.append(
+                f"expected 3 progress notifications before the result, got {len(progress_seen)}; "
+                "a client would see a silent wait"
+            )
+        for index, params in enumerate(progress_seen, start=1):
+            if params.get("progressToken") != "batch-1":
+                failures.append(
+                    f"progress {index} carried token {params.get('progressToken')!r}, not "
+                    "'batch-1'; a client that cannot correlate them ignores every one"
+                )
+            if params.get("progress") != index:
+                failures.append(
+                    f"progress {index} reported {params.get('progress')!r}, so the count "
+                    "is not tracking the work"
+                )
+
         # The real proof that audit correlation works end to end, and it has to
         # live here rather than in a unit test. `MCPServer.call_tool()` is the
         # in-process entry point and does NOT run the middleware chain; only the
@@ -231,8 +313,26 @@ def main() -> int:
                     "the tool call wrote no audit lines to stderr; audit logging "
                     "is a control, and a silently broken one is worse than none"
                 )
-            elif not all(e.get("request_id") == "77" for e in entries):
-                failures.append(f"audit lines are not correlated to request 77: {entries}")
+            else:
+                # Scoped to request 77's own lines, rather than asserting that
+                # *every* line is 77's. The previous form passed only because this
+                # was the last call before the pipe closed, so what it really
+                # asserted was "no other request has run yet" - which a second
+                # call breaks without anything being wrong. The property that
+                # matters is that each record carries the id of the call that
+                # caused it, and that an uncorrelated record is visible.
+                mine = [e for e in entries if e.get("request_id") == "77"]
+                uncorrelated = [e for e in entries if e.get("request_id") is None]
+                unknown = [e for e in entries if e.get("request_id") not in (None, "77", "78")]
+                if not mine:
+                    failures.append(f"no audit line carries request_id 77: {entries}")
+                if uncorrelated:
+                    failures.append(
+                        f"an audit line has no request_id, so it cannot be tied to a "
+                        f"call: {uncorrelated}"
+                    )
+                if unknown:
+                    failures.append(f"audit lines for an unknown request id: {unknown}")
 
     except BrokenPipeError:
         failures.append("the server closed stdout before answering; it likely crashed")
@@ -254,6 +354,7 @@ def main() -> int:
     print(f"  server/discover advertised {PROTOCOL_VERSION} over a real pipe")
     print(f"  tools/list returned {len(expected)} read-only tools, stdout stayed pure JSON-RPC")
     print("  a real tools/call was correlated to its request id in the audit log")
+    print(f"  {len(progress_seen)} progress notifications reached stdout before the result")
     print("  prompts/list returned the triage workflow over the wire")
     print("  resources/read served the skill as text, not base64")
     return 0

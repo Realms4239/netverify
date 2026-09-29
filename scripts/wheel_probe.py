@@ -18,11 +18,14 @@ file. Declaring them outside would import the *checker's* copy of the stdlib pat
 handling and, worse, invite a reader to assume the module body runs in the clean
 environment.
 
-The `PROBE` string below is a **vestigial duplicate** of that logic, left from
-before this file became a real module. `check_wheel_install.py` used to write it
-into the temporary directory; it now copies this file, because a copy that
-defines `main` cannot drift from the module it was copied from - and this one
-had, silently costing a gate run. Delete it once nothing references it.
+The `PROBE` string below is load-bearing, and it is easy to mistake for
+vestigial: `main()` writes it to a temporary file and runs that with the clean
+interpreter's own `sys.executable`. It is *this module* that
+`check_wheel_install.py` copies next to the probe, and the copy is a copy rather
+than a re-write for a reason - an earlier version had the outer script write
+`PROBE` itself, and the two drifted, so the clean interpreter imported a module
+with no `main` and the gate failed on an AttributeError that had nothing to do
+with the wheel. If you change the probe, change it here; the copy follows.
 """
 
 from __future__ import annotations
