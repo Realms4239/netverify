@@ -87,6 +87,14 @@ jobs:
         # prove stdout stayed clean.
         run: python scripts/stdio_check.py
 
+      - name: Prove the built wheel is usable, not merely buildable
+        # Every other gate runs from the checkout, where `skills/` happens to
+        # sit next to `server/`. A wheel that omitted it would pass all of them
+        # and still ship a server serving an empty catalogue. This builds,
+        # installs into a clean venv, and runs the installed package from a
+        # directory with no relationship to the repository.
+        run: python scripts/check_wheel_install.py
+
   # Network-dependent drift check, kept separate so a GitHub outage fails one
   # job loudly instead of blocking the whole pipeline.
   parity:

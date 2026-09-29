@@ -10,8 +10,11 @@ teeth - it denies a documented operation and, in one case, tells the caller to
 retry something that can never succeed.
 """
 
+import io
+import json
 import time
 import unittest
+from contextlib import redirect_stdout
 
 import server.app as app
 from netverify import (
@@ -765,6 +768,80 @@ class TestEveryPatternScalesLinearly(unittest.TestCase):
                 sanitize(text)
                 elapsed = time.perf_counter() - started
                 self.assertLess(elapsed, 2.0, f"{name} took {elapsed:.2f}s")
+
+
+class TestTheJsonFlagWorksInEitherPosition(unittest.TestCase):
+    """Evidence: `netverify self-check --json` failed with "unrecognized arguments".
+
+    `--json` was declared only on the top-level parser, and argparse only accepts
+    a global option *before* the subcommand. So the form anyone actually types -
+    the flag next to the subcommand it modifies - was rejected, with an error
+    that pointed at nothing useful. Found while building the wheel-install gate,
+    which invokes the CLI as a user would rather than as argparse would.
+
+    Pinned on every subcommand, because "the flag exists" is not the property that
+    matters; "the flag is accepted wherever a user would put it" is.
+    """
+
+    SUBCOMMANDS = ("verify", "health", "commands", "self-check")
+
+    def _parse(self, argv):
+        from netverify.cli import build_parser
+
+        return build_parser().parse_args(argv)
+
+    def test_the_flag_is_accepted_after_the_subcommand(self):
+        # `verify` needs its own required option, so it gets a valid one.
+        cases = {
+            "verify": ["verify", "--command", "ping", "--json"],
+            "health": ["health", "a.json", "b.json", "--json"],
+            "commands": ["commands", "--json"],
+            "self-check": ["self-check", "--json"],
+        }
+        for name in self.SUBCOMMANDS:
+            with self.subTest(subcommand=name):
+                args = self._parse(cases[name])
+                self.assertTrue(args.json, f"`{name} --json` did not set the flag")
+
+    def test_the_flag_still_works_before_the_subcommand(self):
+        """`SUPPRESS` on the subparser is what keeps this from regressing.
+
+        Without it the subparser's `False` default silently overwrites the global
+        `True`, so the *original* form would break while the new one worked - a
+        fix that trades one failure for a quieter one.
+        """
+        for name, tail in (
+            ("verify", ["--command", "ping"]),
+            ("health", ["a.json", "b.json"]),
+            ("commands", []),
+            ("self-check", []),
+        ):
+            with self.subTest(subcommand=name):
+                self.assertTrue(self._parse(["--json", name, *tail]).json)
+
+    def test_text_mode_is_still_the_default(self):
+        for name, tail in (
+            ("verify", ["--command", "ping"]),
+            ("health", ["a.json", "b.json"]),
+            ("commands", []),
+            ("self-check", []),
+        ):
+            with self.subTest(subcommand=name):
+                self.assertFalse(self._parse([name, *tail]).json)
+
+    def test_a_real_invocation_prints_json(self):
+        """End to end, because parser state is not the same as output."""
+        from netverify.cli import main
+
+        for argv in (["self-check", "--json"], ["--json", "self-check"]):
+            with self.subTest(argv=argv):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    try:
+                        main(argv)
+                    except SystemExit as exit_code:  # pragma: no cover
+                        self.assertNotEqual(exit_code.code, 2, buffer.getvalue())
+                json.loads(buffer.getvalue())
 
 
 if __name__ == "__main__":

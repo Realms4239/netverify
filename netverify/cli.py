@@ -202,9 +202,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
+
+    # The same flag on every subcommand, so both orderings work:
+    #     netverify --json self-check     and     netverify self-check --json
+    # argparse only accepts a global option *before* the subcommand, so the
+    # second form - which is what anyone actually types, and what a shell user
+    # reaching for a per-command option expects - failed with
+    # "unrecognized arguments: --json". `SUPPRESS` is what makes both work
+    # together: without it the subparser's default False would overwrite the
+    # global True whenever the flag appeared before the subcommand.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="emit JSON instead of text",
+    )
+
     sub = parser.add_subparsers(dest="command", required=True)
 
-    one = sub.add_parser("verify", help="verify one command's output")
+    one = sub.add_parser("verify", parents=[common], help="verify one command's output")
     one.add_argument("--command", required=True, help="command id; see `commands`")
     one.add_argument("--file", help="read from PATH instead of stdin")
     one.add_argument("--interface")
@@ -219,7 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     one.set_defaults(func=cmd_verify)
 
-    health = sub.add_parser("health", help="summarise a capture, or diff two")
+    health = sub.add_parser("health", parents=[common], help="summarise a capture, or diff two")
     health.add_argument("before", help="earlier capture: JSON list of entries")
     health.add_argument("after", help="later capture: JSON list of entries")
     health.add_argument(
@@ -229,10 +246,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     health.set_defaults(func=cmd_health)
 
-    commands = sub.add_parser("commands", help="list the allowlisted commands")
+    commands = sub.add_parser("commands", parents=[common], help="list the allowlisted commands")
     commands.set_defaults(func=cmd_commands)
 
-    check = sub.add_parser("self-check", help="verify this installation's guards")
+    check = sub.add_parser("self-check", parents=[common], help="verify this installation's guards")
     check.set_defaults(func=cmd_selfcheck)
 
     return parser
