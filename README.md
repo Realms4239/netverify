@@ -147,6 +147,17 @@ here classify absence themselves, and a verdict about an interface the tool neve
 saw is an `input_error`, not a fault. Reporting a healthy link as down is the
 mirror image of reporting a dead one as healthy, and it pages people.
 
+**Presence means a row, not a mention.** Whether the capture *can* answer is
+decided by looking for the structure the parser will read — a table row for the
+interface, a `Peer : <ip>` line, a line starting with the prefix — not for the
+name anywhere in the text. The looser test is not safer, it is differently wrong:
+`! ethernet-1/1 is down for maintenance` contains the interface and no state, and
+the loose check answered "interface ethernet-1/1 is not admin-enabled and up" from
+a comment. Note the opposite trap, because tightening creates it: "No entries found
+for prefix …" has no row either, and it is the device *answering*. That is a
+definite `fail`, and it is why the explicit-absence check runs before the row check.
+Both directions are pinned per command in `tests/test_verdict_direction.py`.
+
 **Untrusted text is sanitised before it is reported, and the finding is reported
 too.** Credentials are masked and injection spans become quoted
 `[untrusted-content:…]` markers. Every verdict also carries `findings` — a list of
@@ -156,6 +167,10 @@ Masking without reporting is security theatre: the secret is gone, but the fact
 that they pasted one into a chat window is not.
 
 **Zero BGP peers is never reported healthy.** Upstream returns `{}` for "no
+neighbours" because its callers assert on emptiness; a verifier that answers
+"healthy" about a router with no sessions is the most dangerous answer available.
+The same reasoning drives absence classification everywhere: an empty parse is a
+definite negative answer, not a missing one.
 
 ## Extending it
 
@@ -293,13 +308,20 @@ idempotent, no argument resolves to a control character, `verify` only ever rais
 `ValueError`, batches stay positionally aligned. Seeded and deterministic, so a
 failure is reproducible rather than a flake that gets re-run until it passes.
 
-**Mutation testing** (`scripts/mutation_test.py`) applies ten realistic
-single-line mutations - skip normalisation, drop the redaction loop, unbound the
-batch, delete the idempotence guard - and asserts the suite *fails* on each. A
-survivor is a place the code could be wrong and nothing would notice. One
-survivor is tolerated, with the reason recorded in the file: the control-character
-check is defence in depth behind the argument patterns, so removing it is not
-distinguishable from correct behaviour today.
+**Mutation testing** (`scripts/mutation_test.py`) applies realistic single-line
+mutations - skip normalisation, drop the redaction loop, unbound the batch, delete
+the idempotence guard, loosen a presence check into a substring search - and asserts
+the suite *fails* on each. A survivor is a place the code could be wrong and nothing
+would notice. One survivor is tolerated, with the reason recorded in the file: the
+control-character check is defence in depth behind the argument patterns, so
+removing it is not distinguishable from correct behaviour today.
+
+The harness distinguishes *survived* from **STALE**, and the difference matters. A
+stale anchor means the mutation was never applied, so the suite was never asked the
+question - re-anchor it, because writing a new test for it would be answering a
+question nobody asked. It has also caught a mutation with no teeth: one anchored on
+an initialiser that the following line reassigns, which changed nothing and was
+correctly reported as a survivor.
 
 It also found a real gap. A mutant that broke secret *reporting* inside `scan`
 passed the entire suite, because every secret assertion went through `sanitize`,
@@ -324,7 +346,7 @@ rather than letting them harden into false confidence:
 ## Development
 
 ```sh
-python -m unittest discover -s tests -t .   # 122 tests, stdlib only
+python -m unittest discover -s tests -t .   # 369 tests, stdlib only
 python evals/run_evals.py                   # 46 eval cases
 python scripts/smoke_test.py                # MCP round trip, in-memory
 python scripts/stdio_check.py               # real process, real pipe
@@ -362,9 +384,6 @@ people to ignore stderr entirely.
   which is why the upstream parsers accept several forms.
 - **The vendored file carries no upstream LICENSE**; the flagship has none. It
   is vendored from the same author's public repository.
-
-neighbours" because its callers assert on emptiness; a verifier that answers
-"healthy" about a router with no sessions is the most dangerous answer available.
 
 ## The injection problem, concretely
 

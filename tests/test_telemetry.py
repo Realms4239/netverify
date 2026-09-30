@@ -114,7 +114,18 @@ class TestSpansNestUnderTheRequest(unittest.TestCase):
         self.exporter = InMemorySpanExporter()
         provider = TracerProvider()
         provider.add_span_processor(SimpleSpanProcessor(self.exporter))
-        self._previous_provider = trace.get_tracer_provider()
+        # Save the raw global, not `trace.get_tracer_provider()`. The accessor does
+        # not merely read: with no provider set it *creates and installs* a
+        # `ProxyTracerProvider`, so using it here and restoring the result in
+        # `tearDown` left the process in a state it started in only by accident.
+        #
+        # The import-time `telemetry._TRACER` is a `ProxyTracer`, and a
+        # `ProxyTracer` left resolving against a `ProxyTracerProvider` recurses
+        # until the stack runs out. Against a `None` provider it falls back to a
+        # no-op tracer and works fine, which is why the fresh process is healthy and
+        # the process that has run this class is not. Restoring the `None` we found
+        # is the whole fix.
+        self._previous_provider = trace._TRACER_PROVIDER  # noqa: SLF001
         trace._TRACER_PROVIDER = provider  # noqa: SLF001 - the documented override
 
         # The module-level tracer is bound at import time, and the SDK's provider
@@ -166,6 +177,56 @@ class TestSpansNestUnderTheRequest(unittest.TestCase):
         attributes = dict(ours[0].attributes)
         self.assertIs(attributes.get("netverify.verdict.ok"), False)
         self.assertEqual(len(ours[0].events), 0, "a failed check must not raise")
+
+
+class TestTracerStateSurvivesProviderSwaps(unittest.TestCase):
+    """The suite must not leave OpenTelemetry in a state where `verify` explodes.
+
+    Named to sort after `TestSpansNestUnderTheRequest` - `loadTestsFromModule`
+    orders classes alphabetically - because the bug is what that class leaves
+    *behind*, not what it does while it runs. Its `tearDown` undoes the swap, so
+    nothing in the class notices, and the casualty is whichever module happens to
+    run last in the whole suite. That is how a `RecursionError` in an unrelated
+    test file ends up looking like a bug in whatever was committed most recently.
+    """
+
+    def test_the_import_tracer_is_not_left_resolving_against_a_proxy_provider(self):
+        """The structural invariant, named so the failure is self-explaining.
+
+        `ProxyTracer` against `None` resolves to a no-op tracer; against a
+        `ProxyTracerProvider` it asks that provider for a tracer, gets another
+        `ProxyTracer`, and asks again until the stack is gone.
+        """
+        from opentelemetry import trace
+
+        from netverify import telemetry
+
+        proxy_tracer = getattr(trace, "ProxyTracer", None)
+        proxy_provider = getattr(trace, "ProxyTracerProvider", None)
+        self.assertIsNotNone(proxy_tracer, "opentelemetry.trace.ProxyTracer moved")
+        self.assertIsNotNone(proxy_provider, "opentelemetry.trace.ProxyTracerProvider moved")
+
+        if isinstance(telemetry._TRACER, proxy_tracer):  # noqa: SLF001
+            self.assertNotIsInstance(
+                trace._TRACER_PROVIDER,  # noqa: SLF001
+                proxy_provider,
+                "a ProxyTracer left against a ProxyTracerProvider recurses on first "
+                "use, so every later verify() in the process dies with "
+                "RecursionError rather than returning a verdict",
+            )
+
+    def test_verify_still_returns_a_verdict_after_the_swap(self):
+        """The behaviour, because the invariant above is easy to satisfy by accident.
+
+        A `None` provider, a real provider, or no tracer at all are all fine here.
+        Only the broken pair fails, and it fails by raising rather than asserting -
+        which is exactly why it needs to be asked for explicitly.
+        """
+        from netverify import verify
+
+        verdict = verify("ping", "3 packets transmitted, 3 received, 0% packet loss\n", audit=None)
+
+        self.assertTrue(verdict.ok)
 
 
 class _MetricsCase(unittest.TestCase):

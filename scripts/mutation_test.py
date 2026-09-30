@@ -174,10 +174,34 @@ MUTATIONS: list[tuple[str, str, str, str, bool]] = [
         # the tool never saw it.
         "netverify/registry.py",
         # Anchored on the absence branch alone rather than the whole call, so this
-        # survives an edit that reformats the checker above it.
-        "    if not _mentions(output, interface):",
+        # survives an edit that reformats the checker above it. Re-anchored when
+        # `_mentions` became `_interface_row` - the presence test is no longer a
+        # substring search, and an anchor written against the old name reports as
+        # STALE rather than testing anything.
+        "    if not _interface_row(output, interface):",
         "    if False:  # MUTANT: absence is a network fault again",
         "an interface missing from the capture is reported as down, not unreadable",
+        False,
+    ),
+    (
+        # The two below are the second-pass findings, and they are only meaningful
+        # because presence is a *row* rather than a mention. Dropping the
+        # sub-interface form makes a genuine down sub-interface unreadable - the
+        # fault escapes as `input_error` and the operator is told their paste was
+        # wrong. Loosening the route row to a substring search makes the echoed
+        # command line look like a route entry, which is the exact trap
+        # `_route_row`'s docstring warns about.
+        "netverify/registry.py",
+        'rf"\\|\\s*{re.escape(interface)}(?:\\.\\d+)?\\s*\\|"',
+        'rf"\\|\\s*{re.escape(interface)}\\s*\\|"',
+        "a down sub-interface row is no longer recognised as a row for its parent",
+        False,
+    ),
+    (
+        "netverify/registry.py",
+        "        if stripped.startswith(prefix):",
+        "        if prefix in stripped:",
+        "the echoed query is mistaken for a route entry, so a missing route is excused",
         False,
     ),
     (

@@ -21,11 +21,11 @@ credentials, opens no sockets, and cannot mutate a device. Version 1.2.0.
 
 ## Verified state
 
-Full gate set green as of `90a1a99`, plus the instrumentation cycle below:
+Full gate set green after the second hardening pass described below:
 
 ```
-320 tests · 46/46 evals · ruff check · ruff format · bandit -ll ·
-zero-dependency · mutation 10/10 · smoke · parity · stdio · wheel-install
+369 tests · 46/46 evals · ruff check · ruff format · bandit -ll ·
+zero-dependency · mutation 19/19 · smoke · parity · stdio · wheel-install
 ```
 
 ## What the five requested items actually are
@@ -116,6 +116,55 @@ down next to the code rather than left for someone to rediscover as a regression
 
 All three are mutation-pinned, and all three were found by a probe or a rehearsal
 rather than by reasoning about the code.
+
+### A second pass, after the first was written up
+
+The first absence-classification fix had the right idea and the wrong test. Its
+presence check asked whether the subject was *mentioned anywhere* in the capture,
+which is true of `! ethernet-1/1 is down for maintenance` — a comment, no table, no
+state — so the checker answered "interface ethernet-1/1 is not admin-enabled and
+up", a fault claim read off text containing no interface state at all. Presence is
+now the **row**, mirroring the opening of the vendored parser that will read it:
+`_interface_row`, `_cell`, `_peer_line`, `_route_row`.
+
+**That tightening immediately broke the opposite case, which is the useful part.**
+`No entries found for prefix 10.20.30.0/24` has no route row, so a presence test
+that runs first reads a rendered-but-empty table as an *unreadable capture* and
+tells the operator their paste was wrong — while a route is genuinely missing. The
+device answering "no" and the device saying nothing look identical to a row search,
+and only the former is a fault. `_check_route` therefore tests `_NO_ENTRIES`
+*before* the row check. Both directions are pinned, per command, in
+`tests/test_verdict_direction.py`: eleven genuine faults that must be `fail`, five
+captures that must be `input_error`, and one assertion that **nothing** in either
+table is ever `pass`.
+
+**Two green tests were never collected.** `test_checker_signature_matches_declared_arguments`
+and `test_worst_offender_carries_its_own_reason` were defined *after* a module-level
+`unittest.main()` call, so they were nested inside the `if __name__ == "__main__"`
+block and had never run. They pass, so the invariants they name do hold — they were
+just decoration. `tests/test_integrity.py` now walks every test module's AST and
+fails on any `test_*` function below module level, with a negative control compiled
+from a string so the guard itself is proven to fire.
+
+**A latent `RecursionError` in the telemetry tests, found by the new file tripping
+over it.** `tests/test_telemetry.py` saved the previous provider with
+`trace.get_tracer_provider()` — which does not merely read. With no provider set it
+*creates and installs* a `ProxyTracerProvider`, and restoring that in `tearDown`
+left the import-time `_TRACER` (a `ProxyTracer`) resolving against a proxy provider:
+each asks the other for a tracer until the stack is gone. A fresh process is healthy
+because the provider is `None` and the proxy falls back to a no-op tracer. So the
+whole suite passed while leaving a process where **any later `verify()` call dies**,
+and the casualty was whichever module sorted last. Fixed by saving the raw global;
+pinned by `TestTracerStateSurvivesProviderSwaps`, which asserts both the structural
+invariant and that `verify()` still returns a verdict. It had to be named to sort
+after the class that creates the bad state, because `loadTestsFromModule` orders
+classes alphabetically.
+
+**A toothless mutation.** The `findings` mutation was anchored on `findings = ()` —
+an initialiser the next line reassigns, so mutating it changed nothing and the
+harness reported a survivor. Re-anchored on the assignment. Two mutations were
+added for the new presence code (dropping the sub-interface form; loosening the
+route row to a substring), both of which the new table catches.
 
 ## Work queued, in order
 
@@ -266,10 +315,10 @@ cd C:\work\hardened-mcp-evals
 $env:NETVERIFY_AUDIT = '0'          # silences the audit log during tests
 $env:PYTHONIOENCODING = 'utf-8'     # em-dashes crash cp1252 output
 
-python -m unittest discover -s tests -t .   # 251 tests
+python -m unittest discover -s tests -t .   # 369 tests
 python evals/run_evals.py                   # 46/46
 python scripts/check_wheel_install.py       # build + install + run
-python scripts/mutation_test.py             # 10/10
+python scripts/mutation_test.py             # 19/19
 python scripts/stdio_check.py
 python scripts/smoke_test.py
 python scripts/check_upstream_parity.py
@@ -324,8 +373,8 @@ python -m bandit -q -r netverify server scripts -ll -x netverify\parsers
 
 The most important thing the previous session learned: **every gate ran from
 the checkout**, where `skills/` happens to sit next to `server/`. A wheel that
-omitted it would have passed all 251 tests while shipping a server that starts
-normally and serves an empty catalogue. Hence `scripts/check_wheel_install.py`.
+omitted it would have passed the entire test suite while shipping a server that
+starts normally and serves an empty catalogue. Hence `scripts/check_wheel_install.py`.
 
 `SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills"` is correct for
 this layout and **silently wrong** the moment the package is vendored, frozen,

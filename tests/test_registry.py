@@ -79,6 +79,17 @@ class TestRegistryIntegrity(unittest.TestCase):
             with self.subTest(command=spec.id):
                 self.assertTrue(callable(spec.check))
 
+    def test_checker_signature_matches_declared_arguments(self):
+        """A required argument no checker reads would make a call impossible."""
+        for spec in COMMANDS:
+            params = set(inspect.signature(spec.check).parameters) - {"output"}
+            with self.subTest(command=spec.id):
+                self.assertEqual(
+                    params,
+                    set(spec.required) | set(spec.optional),
+                    f"{spec.id} declares arguments its checker does not accept",
+                )
+
     def test_registry_ids_are_sorted_and_unique(self):
         """Deterministic order is what lets clients cache the tool list."""
         ids = [spec.id for spec in COMMANDS]
@@ -188,14 +199,3 @@ class TestSanitizationIsAlwaysOn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-    def test_checker_signature_matches_declared_arguments(self):
-        """A required argument no checker reads would make a call impossible."""
-        for spec in COMMANDS:
-            params = set(inspect.signature(spec.check).parameters) - {"output"}
-            with self.subTest(command=spec.id):
-                self.assertEqual(
-                    params,
-                    set(spec.required) | set(spec.optional),
-                    f"{spec.id} declares arguments its checker does not accept",
-                )

@@ -3,9 +3,9 @@
 
 Every other gate here runs against the checkout. That is a real gap: the one
 thing packaging can break is packaging, and nothing else would notice. A wheel
-that omits `skills/` still passes 247 tests, 46 evals, the mutation suite and
-the stdio check - all of which run from the source tree, where `skills/` happens
-to sit next to `server/`.
+that omits `skills/` still passes the whole test suite, the evals, the mutation
+suite and the stdio check - all of which run from the source tree, where `skills/`
+happens to sit next to `server/`.
 
 So this builds the wheel, installs it into a throwaway virtual environment, and
 runs the installed package from a directory unrelated to the repository. Four

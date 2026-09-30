@@ -12,6 +12,7 @@ computed at runtime actually are, because a claim that cannot fail is a caption
 rather than a control.
 """
 
+import ast
 import asyncio
 import json
 import pathlib
@@ -326,6 +327,148 @@ class TestHonestyAboutTheNetwork(unittest.TestCase):
     def test_report_is_json_serialisable(self):
         """It is returned over MCP, so it has to survive the wire."""
         json.dumps(self_check())
+
+
+class TestNoTestIsSilentlyDisabled(unittest.TestCase):
+    """A test that cannot be collected is not a test, and the suite cannot tell.
+
+    This class exists because two tests in this suite were dead in exactly that
+    way. `test_worst_offender_carries_its_own_reason` and
+    `test_checker_signature_matches_declared_arguments` were written at the bottom
+    of their files with a four-space indent, which put them inside the
+    `if __name__ == "__main__":` block below `unittest.main()`. They parsed, they
+    imported, they were named like tests, and no runner ever called them: a
+    `def test_...` is only a test when it is a method of a TestCase.
+
+    That failure is invisible in the one place everyone looks. The suite stays
+    green, the count rises when someone adds a real test, and the invariant the
+    dead test named has no guard at all - the same shape as the comment in
+    `integrity.py` that cited a test file which did not exist. So the shape is
+    checked mechanically rather than remembered.
+    """
+
+    def setUp(self):
+        self.files = sorted((ROOT / "tests").glob("test_*.py"))
+        self.assertGreater(len(self.files), 10, "the sweep found no test files")
+
+    @staticmethod
+    def _parents(tree):
+        """Yield (node, enclosing statements) for every node in the module."""
+
+        def walk(body, parents):
+            for node in body:
+                yield node, parents
+                for attr in ("body", "orelse", "finalbody", "handlers"):
+                    inner = getattr(node, attr, None)
+                    if isinstance(inner, list):
+                        yield from walk(inner, [*parents, node])
+
+        yield from walk(tree.body, [])
+
+    @classmethod
+    def _testcase_names(cls, tree):
+        """Every class in the module that is, transitively, a TestCase.
+
+        Transitive because the alternative is not merely incomplete, it is wrong:
+        most of the telemetry tests are methods of `TestMetricsAreRecorded`, which
+        extends a local `_MetricsCase`, which extends `unittest.TestCase`. A check
+        that read only a class's own bases would call those twenty tests dead.
+        """
+        bases = {
+            node.name: [ast.unparse(base).split(".")[-1] for base in node.bases]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+        }
+
+        def is_case(name, seen=frozenset()):
+            if name == "TestCase":
+                return True
+            if name in seen:
+                return False
+            return any(is_case(base, seen | {name}) for base in bases.get(name, ()))
+
+        return {name for name in bases if is_case(name)}
+
+    def _uncollectable(self, path):
+        """Every `def test_*` in `path` no runner can reach, with the reason."""
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        cases = self._testcase_names(tree)
+        found = []
+        for node, parents in self._parents(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not node.name.startswith("test"):
+                continue
+            classes = [p for p in parents if isinstance(p, ast.ClassDef)]
+            enclosing = [p for p in parents if isinstance(p, ast.FunctionDef)]
+            if enclosing:
+                found.append((node, "nested inside a function"))
+            elif not classes:
+                where = ast.unparse(parents[-1]) if parents else "the module body"
+                found.append((node, f"defined outside any class, under {where!r}"))
+            elif not any(c.name in cases for c in classes):
+                found.append((node, f"defined in {classes[-1].name!r}, not a TestCase"))
+        return found
+
+    def test_every_test_definition_is_collectable(self):
+        """The sweep, reported per file so a failure names the file."""
+        dead = {}
+        for path in self.files:
+            found = self._uncollectable(path)
+            if found:
+                dead[path.name] = [
+                    f"{node.name} (line {node.lineno}): {why}" for node, why in found
+                ]
+        self.assertEqual(dead, {}, f"tests no runner will ever call: {dead}")
+
+    def test_the_sweep_can_actually_see_a_dead_test(self):
+        """Negative control, in the spirit of the import scanner's.
+
+        A walk that finds nothing because it is broken would report a clean suite
+        forever, which is the defect above wearing a uniform. So build the exact
+        shape that was there - a test indented under `unittest.main()` - and
+        require the sweep to catch it.
+        """
+        broken = ROOT / "tests" / "test_unreachable_control.py"
+        broken.write_text(
+            "import unittest\n"
+            "\n"
+            "class Real(unittest.TestCase):\n"
+            "    def test_a_real_one(self):\n"
+            "        pass\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    unittest.main()\n"
+            "\n"
+            "    def test_never_called(self):\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(broken.unlink)
+
+        found = self._uncollectable(broken)
+
+        self.assertEqual(
+            [node.name for node, _ in found],
+            ["test_never_called"],
+            "the sweep cannot see the defect it exists to catch",
+        )
+
+    def test_the_sweep_sees_the_whole_suite(self):
+        """Non-vacuity: a sweep that inspects no test functions passes trivially."""
+        counted = 0
+        for path in self.files:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            counted += sum(
+                1
+                for node, _ in self._parents(tree)
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("test")
+            )
+        self.assertGreater(
+            counted,
+            200,
+            f"only found {counted} test functions across {len(self.files)} files",
+        )
 
 
 if __name__ == "__main__":

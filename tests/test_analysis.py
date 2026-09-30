@@ -76,6 +76,11 @@ class TestSynthesizeHealth(unittest.TestCase):
         self.assertEqual(health["status"], "healthy")
         self.assertEqual(health["checked"], 0)
 
+    def test_worst_offender_carries_its_own_reason(self):
+        """Actionable without a second call - that is the point of `worst`."""
+        health = synthesize_health(verify_many(cap({"command": "ping", "output": PING_LOSS})))
+        self.assertTrue(health["worst"]["reasons"])
+
 
 class TestCompareStates(unittest.TestCase):
     def test_identical_captures_show_no_change(self):
@@ -198,8 +203,3 @@ class TestSelfCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-    def test_worst_offender_carries_its_own_reason(self):
-        """Actionable without a second call - that is the point of `worst`."""
-        health = synthesize_health(verify_many(cap({"command": "ping", "output": PING_LOSS})))
-        self.assertTrue(health["worst"]["reasons"])

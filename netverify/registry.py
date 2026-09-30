@@ -259,15 +259,64 @@ def _absent(name: str, subject: str) -> Check:
     )
 
 
-def _mentions(output: str, needle: str) -> bool:
-    """Whether `output` mentions `needle` at all, as a whole token.
+def _present(output: str, pattern: str) -> bool:
+    """Whether the text contains the structure a checker needs to answer at all.
 
-    Deliberately loose. This is an *absence* check, so a false positive is safe -
-    the checker falls through to its real answer - while a false negative turns a
-    readable capture into "not a network fault", which is the failure this change
-    is about. So it errs towards "present".
+    Each pattern mirrors the *opening* of what the vendored parser looks for, and
+    mirroring it matters: presence is the difference between "this capture says
+    the link is down" and "this capture does not mention the link", and only the
+    parser knows which shapes can carry that answer.
+
+    A looser test is not safer, it is differently wrong. Asking only whether the
+    interface is *mentioned anywhere* passed `! ethernet-1/1 is down for
+    maintenance` - a comment, with no table and no state - and the checker then
+    answered "interface ethernet-1/1 is not admin-enabled and up": a fault claim
+    read off text that contains no interface state at all. So the presence test is
+    the row, not the name.
     """
-    return bool(re.search(rf"\b{re.escape(needle)}\b", output, re.IGNORECASE))
+    return bool(re.search(pattern, output, re.IGNORECASE))
+
+
+def _interface_row(output: str, interface: str) -> bool:
+    """A table row for `interface`, in any administrative or operational state.
+
+    Mirrors the opening of `srl_interface_is_up`, including its tolerance for the
+    `ethernet-1/1.0` sub-interface form.
+    """
+    return _present(output, rf"\|\s*{re.escape(interface)}(?:\.\d+)?\s*\|")
+
+
+def _cell(output: str, value: str) -> bool:
+    """`value` occupying a whole table cell."""
+    return _present(output, rf"\|\s*{re.escape(value)}\s*\|")
+
+
+def _peer_line(output: str, peer_ip: str) -> bool:
+    """A `Peer : <ip>` line, which is how SR Linux renders one BGP peer's block."""
+    return _present(output, rf"\bPeer\s*:\s*{re.escape(peer_ip)}\b")
+
+
+def _route_row(output: str, prefix: str) -> bool:
+    """A line that *starts* with the prefix, which is how the parser finds a row.
+
+    Not a substring test, and the parser says why in its own docstring: the
+    command line echoes the query back, so `prefix in output` is true for a prefix
+    with no route installed. The same reasoning applies to asking whether the text
+    is about this prefix at all.
+    """
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            stripped = stripped[1:].strip()
+        if stripped.startswith(prefix):
+            return True
+    return False
+
+
+# The parser's own test for a definite negative answer from the device: the route
+# table was rendered and this prefix is not in it. Mirrored here because the
+# verdict depends on it - see `_check_route`.
+_NO_ENTRIES = r"no\s+(?:entries|routes|matches)\s+found"
 
 
 def _check_interface(output: str, interface: str) -> Check:
@@ -275,7 +324,7 @@ def _check_interface(output: str, interface: str) -> Check:
     ok = upstream.srl_interface_is_up(output, interface)
     if ok:
         return Check(name=name, ok=True, reasons=())
-    if not _mentions(output, interface):
+    if not _interface_row(output, interface):
         return _absent(name, f"row for interface {interface}")
     return Check(
         name=name,
@@ -289,7 +338,7 @@ def _check_ospf(output: str, neighbor_router_id: str) -> Check:
     ok = upstream.srl_ospf_neighbor_is_full(output, neighbor_router_id)
     if ok:
         return Check(name=name, ok=True, reasons=())
-    if not _mentions(output, neighbor_router_id):
+    if not _cell(output, neighbor_router_id):
         return _absent(name, f"row for neighbour {neighbor_router_id}")
     return Check(
         name=name,
@@ -306,7 +355,7 @@ def _check_bgp_neighbor(output: str, peer_ip: str, remote_as: str) -> Check:
     ok = upstream.srl_bgp_peer_established(output, peer_ip, remote_as)
     if ok:
         return Check(name=name, ok=True, reasons=())
-    if not _mentions(output, peer_ip):
+    if not _peer_line(output, peer_ip):
         return _absent(name, f"entry for peer {peer_ip}")
     return Check(
         name=name,
@@ -323,8 +372,20 @@ def _check_route(output: str, prefix: str) -> Check:
     ok, reasons = upstream.srl_route_is_installed(output, prefix)
     if ok:
         return Check(name=name, ok=True, reasons=())
-    if not _mentions(output, prefix):
-        return _absent(name, f"entry for prefix {prefix}")
+    if _present(output, _NO_ENTRIES):
+        # The device answered the question and the answer is "no such route".
+        # That is a finding about the network, not about the capture, so it stays
+        # a fault even though there is no route row to point at. Ordering this
+        # test before the absence test is the whole point: an unreadable capture
+        # and a rendered-but-empty table look identical until you ask whether the
+        # device said anything at all.
+        return Check(
+            name=name,
+            ok=False,
+            reasons=tuple(_redact(r) for r in reasons),
+        )
+    if not _route_row(output, prefix):
+        return _absent(name, f"route row for prefix {prefix}")
     return Check(
         name=name,
         ok=False,
