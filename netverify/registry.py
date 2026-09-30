@@ -229,37 +229,89 @@ def _redact(text: str, limit: int = 200) -> str:
     return sanitize(text, max_bytes=limit * 4).safe_text[:limit]
 
 
-def _check_interface(output: str, interface: str) -> Check:
-    ok = upstream.srl_interface_is_up(output, interface)
+def _absent(name: str, subject: str) -> Check:
+    """The capture did not contain the thing that was asked about.
+
+    The distinction this exists to draw is the mirror image of the one the README
+    calls most dangerous. That one is a verifier answering "healthy" about a
+    router with no sessions. This is a verifier answering "down" about an
+    interface the tool never saw - which is what happened, and it is an ordinary
+    mistake to make: an operator pastes the slice of `show interface brief` that
+    scrolled past, the interface they care about is above it, and the tool
+    reports a network fault on a healthy link.
+
+    The upstream parsers return a bare `bool`, so "not in the text" and "in the
+    text and down" are indistinguishable to them - and they are *vendored*,
+    pinned byte-identical to upstream by the parity gate, so the classification
+    has to happen here, in the adapter that owns the meaning.
+
+    `verify` maps any reason containing "input error" to `Outcome.INPUT_ERROR`, so
+    the label is the contract rather than the exception type.
+    """
     return Check(
-        name=f"interface {interface} is admin-enabled and oper-up",
-        ok=ok,
-        reasons=() if ok else (f"interface {interface} is not admin-enabled and up",),
+        name=name,
+        ok=False,
+        reasons=(
+            f"input error, not a network fault: this capture contains no {subject}, "
+            f"so there is nothing to judge. Re-capture the command output that "
+            f"includes it.",
+        ),
+    )
+
+
+def _mentions(output: str, needle: str) -> bool:
+    """Whether `output` mentions `needle` at all, as a whole token.
+
+    Deliberately loose. This is an *absence* check, so a false positive is safe -
+    the checker falls through to its real answer - while a false negative turns a
+    readable capture into "not a network fault", which is the failure this change
+    is about. So it errs towards "present".
+    """
+    return bool(re.search(rf"\b{re.escape(needle)}\b", output, re.IGNORECASE))
+
+
+def _check_interface(output: str, interface: str) -> Check:
+    name = f"interface {interface} is admin-enabled and oper-up"
+    ok = upstream.srl_interface_is_up(output, interface)
+    if ok:
+        return Check(name=name, ok=True, reasons=())
+    if not _mentions(output, interface):
+        return _absent(name, f"row for interface {interface}")
+    return Check(
+        name=name,
+        ok=False,
+        reasons=(f"interface {interface} is not admin-enabled and up",),
     )
 
 
 def _check_ospf(output: str, neighbor_router_id: str) -> Check:
+    name = f"OSPF neighbour {neighbor_router_id} is full with zero bad neighbours"
     ok = upstream.srl_ospf_neighbor_is_full(output, neighbor_router_id)
+    if ok:
+        return Check(name=name, ok=True, reasons=())
+    if not _mentions(output, neighbor_router_id):
+        return _absent(name, f"row for neighbour {neighbor_router_id}")
     return Check(
-        name=f"OSPF neighbour {neighbor_router_id} is full with zero bad neighbours",
-        ok=ok,
-        reasons=()
-        if ok
-        else (
+        name=name,
+        ok=False,
+        reasons=(
             f"neighbour {neighbor_router_id} did not reach full with no bad "
-            "neighbours; it may be stuck mid-handshake or absent entirely",
+            "neighbours; it may be stuck mid-handshake",
         ),
     )
 
 
 def _check_bgp_neighbor(output: str, peer_ip: str, remote_as: str) -> Check:
+    name = f"BGP peer {peer_ip} is established with remote AS {remote_as}"
     ok = upstream.srl_bgp_peer_established(output, peer_ip, remote_as)
+    if ok:
+        return Check(name=name, ok=True, reasons=())
+    if not _mentions(output, peer_ip):
+        return _absent(name, f"entry for peer {peer_ip}")
     return Check(
-        name=f"BGP peer {peer_ip} is established with remote AS {remote_as}",
-        ok=ok,
-        reasons=()
-        if ok
-        else (
+        name=name,
+        ok=False,
+        reasons=(
             f"peer {peer_ip} is not established with remote AS {remote_as}; "
             "check the session state and that the expected AS is configured",
         ),
@@ -267,10 +319,15 @@ def _check_bgp_neighbor(output: str, peer_ip: str, remote_as: str) -> Check:
 
 
 def _check_route(output: str, prefix: str) -> Check:
+    name = f"route {prefix} is installed"
     ok, reasons = upstream.srl_route_is_installed(output, prefix)
+    if ok:
+        return Check(name=name, ok=True, reasons=())
+    if not _mentions(output, prefix):
+        return _absent(name, f"entry for prefix {prefix}")
     return Check(
-        name=f"route {prefix} is installed",
-        ok=ok,
+        name=name,
+        ok=False,
         # Upstream already explains what it saw. Redacted because that text
         # quotes device output.
         reasons=tuple(_redact(r) for r in reasons),
@@ -278,11 +335,23 @@ def _check_route(output: str, prefix: str) -> Check:
 
 
 def _check_ping(output: str) -> Check:
+    """Ping has no subject to look for, so presence means "is this ping output?".
+
+    `ping_succeeded` is a bare bool over text that may be anything at all, so an
+    empty capture and a 100% loss both answer False. The first is a paste
+    mistake; the second is a network fault, and reporting the first as the second
+    pages somebody about a device that answers.
+    """
+    name = "ping reached the far end with no total loss"
     ok = upstream.ping_succeeded(output)
+    if ok:
+        return Check(name=name, ok=True, reasons=())
+    if not re.search(r"packets transmitted", output, re.IGNORECASE):
+        return _absent(name, "ping output (no 'packets transmitted' summary line)")
     return Check(
-        name="ping reached the far end with no total loss",
-        ok=ok,
-        reasons=() if ok else ("no successful reply was recorded; total or partial loss",),
+        name=name,
+        ok=False,
+        reasons=("no successful reply was recorded; total or partial loss",),
     )
 
 

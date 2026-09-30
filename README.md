@@ -139,11 +139,21 @@ fires on `configure terminal`.
 
 **A failing network is data; a bad capture is an error.** `outcome` separates
 `fail` from `input_error`. Collapsing them is how a tool tells an operator their
-router is down when the real problem is a truncated paste.
+router is down when the real problem is a truncated paste. The case that matters
+most is the ordinary one: you ask about `ethernet-1/6` and paste a capture that
+scrolled past it. The upstream parsers return a bare boolean, so "not in this
+text" and "in this text and down" are indistinguishable to them — so the checkers
+here classify absence themselves, and a verdict about an interface the tool never
+saw is an `input_error`, not a fault. Reporting a healthy link as down is the
+mirror image of reporting a dead one as healthy, and it pages people.
 
-**Untrusted text is sanitised before it is reported.** Credentials are masked and
-injection spans become quoted `[untrusted-content:…]` markers, with findings
-returned alongside so the change is auditable rather than silent.
+**Untrusted text is sanitised before it is reported, and the finding is reported
+too.** Credentials are masked and injection spans become quoted
+`[untrusted-content:…]` markers. Every verdict also carries `findings` — a list of
+`{kind, severity}` and nothing else, never the matched text — so an operator learns
+their capture contained a password instead of being quietly protected from it.
+Masking without reporting is security theatre: the secret is gone, but the fact
+that they pasted one into a chat window is not.
 
 **Zero BGP peers is never reported healthy.** Upstream returns `{}` for "no
 

@@ -26,7 +26,7 @@ from .errors import (
 )
 from .limits import Deadline
 from .models import Outcome, Verdict
-from .sanitize import MAX_BYTES, sanitize
+from .sanitize import MAX_BYTES, sanitize, scan
 from .scope import validate
 from .telemetry import (
     ATTR_COMMAND_ID,
@@ -115,6 +115,30 @@ def verify(
         if not check.ok and any("input error" in reason for reason in check.reasons):
             outcome = Outcome.INPUT_ERROR
 
+        # What the caller's own text contained, as kind/severity only. The
+        # operator pasted the text; if it held a credential or an injection, they
+        # need to know, and they cannot know from a verdict that quietly protected
+        # them. The matched text is never carried - `scan` returns a fixed
+        # description per kind precisely so this can be safe, which is what
+        # `tests/test_telemetry_payloads.py` pins from the other direction.
+        #
+        # Skipped when sanitising is off: that flag exists for callers who have
+        # already sanitised the text themselves, and scanning it again would be
+        # work they did not ask for.
+        #
+        # The cost is real and worth naming: a maximal 64 KiB capture goes from
+        # about 8ms to about 83ms, because `verify` previously sanitised only the
+        # short strings it returns and never looked at the caller's text at all.
+        # That stays affordable against the 256 KiB batch budget and the 5s
+        # deadline - both asserted in `tests/test_hostile_inputs.py` - and it buys
+        # the operator the knowledge that their capture held a credential. Do not
+        # optimise it away without re-measuring those two.
+        findings: tuple[tuple[str, str], ...] = ()
+        if sanitize_output:
+            findings = tuple(
+                (finding.kind, finding.severity) for finding in scan(request["output"])
+            )
+
         verdict = Verdict(
             ok=check.ok,
             outcome=outcome,
@@ -125,6 +149,7 @@ def verify(
             observed=observed,
             reasons=reasons,
             arguments=request["arguments"],
+            findings=findings,
         )
 
         # Set after the work, because they are only knowable afterwards. This is

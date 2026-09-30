@@ -44,20 +44,24 @@ def _require_text(value: Any, field: str, *, command: str | None = None) -> str:
 
     Three checks, in this order, and the order matters.
 
-    1. **Control characters, on the raw value.** Whitespace, newlines and tabs
-       are refused because arguments are interpolated into the verdict's
-       `check` and `reasons` fields, so an argument carrying a newline lets a
-       caller forge an extra line into text an agent may read as a separate
-       finding. That is output injection, and secret redaction cannot stop it -
-       a forged line is not a secret.
+    1. **Non-printable characters, on the raw value.** Anything Unicode calls
+       Other or Separator - every Cc control, every Cf format character
+       (zero-width joiners, bidi overrides), Zl and Zp - is refused, because
+       arguments are interpolated into the verdict's `check` and `reasons` fields,
+       so an argument carrying a line break lets a caller forge an extra line into
+       text an agent may read as a separate finding. That is output injection, and
+       secret redaction cannot stop it - a forged line is not a secret.
+
+       ASCII space stays allowed and is trimmed: trailing whitespace in a JSON
+       argument is a formatting habit, not an attack. Everything else that is not
+       printable is refused, including U+00A0, which is a confusable rather than a
+       space.
 
        Checked *before* stripping. Checking after meant a leading tab was
-       removed by `strip()` and then accepted, while the rule printed right
-       above said tabs were refused. No forged output resulted, because the
-       stripped value is what gets quoted - but a control that documents one
-       behaviour and implements another is exactly the defect class this project
-       keeps finding. Plain spaces are still trimmed, because trailing
-       whitespace in a JSON argument is a formatting habit, not an attack.
+       removed by `strip()` and then accepted, while the rule printed right above
+       said tabs were refused. No forged output resulted, because the stripped
+       value is what gets quoted - but a control that documents one behaviour and
+       implements another is exactly the defect class this project keeps finding.
 
     2. **Shape**, via the registry's pattern: is this an address, an interface,
        a prefix?
@@ -79,11 +83,29 @@ def _require_text(value: Any, field: str, *, command: str | None = None) -> str:
             command=command,
         )
 
-    # Before strip(), deliberately: see the docstring.
-    if any(ch in value for ch in "\r\n\t"):
+    # Before strip(), deliberately: see the docstring. And "non-printable" rather
+    # than the three characters this used to test for, because `\r\n\t` was
+    # narrower than the rule the docstring states - and narrower than the attack.
+    #
+    # A probe found the gap: with a field that has no registry pattern, VT
+    # (U+000B), FF (U+000C), NEL (U+0085), U+2028 LINE SEPARATOR and U+2029
+    # PARAGRAPH SEPARATOR were all *accepted*. Every one of them is a line break
+    # to a terminal, a JSON renderer or a Markdown engine - exactly the forged
+    # line the rule exists to prevent - and VT/FF are terminal escapes besides.
+    # Nothing caught them except the patterns, which are a separate dict: adding
+    # an argument to a CommandSpec does not require adding a pattern, so the
+    # next patternless argument would have had no defence at all.
+    #
+    # `str.isprintable()` is the standard library's own definition - every
+    # character in Other or Separator except ASCII space - so it covers Cc, Cf
+    # (including the zero-width and bidirectional overrides the sanitizer hunts
+    # for in device output), Zl and Zp in one call. It also refuses U+00A0, which
+    # is right for the same reason: a non-breaking space in an interface name is
+    # a confusable, not a space.
+    if not value.isprintable():
         raise ScopeError(
-            f"{field} must not contain line breaks or tabs; it is quoted back in "
-            f"the verdict, so a newline would forge a new line of output. Got: "
+            f"{field} must not contain control characters; it is quoted back in "
+            f"the verdict, so a line break would forge a new line of output. Got: "
             f"{value[:40]!r}",
             reason=REASON_BAD_ARGUMENT,
             command=command,

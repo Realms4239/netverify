@@ -137,6 +137,12 @@ class TestTokenBucketUnderConcurrency(unittest.TestCase):
     however many threads arrive at once.
     """
 
+    #: Bounded on purpose: an unbounded `Barrier.wait()` blocks forever if a
+    #: sibling thread is starved before it arrives, which turns a loaded machine
+    #: into a suite that hangs with no output instead of a test that fails.
+    BARRIER_TIMEOUT = 30.0
+    JOIN_TIMEOUT = 60.0
+
     def _race(self, bucket, attempts, cost=1.0):
         """`attempts` threads all try to spend `cost`; return the win count."""
         barrier = threading.Barrier(attempts)
@@ -144,7 +150,7 @@ class TestTokenBucketUnderConcurrency(unittest.TestCase):
         lock = threading.Lock()
 
         def spend():
-            barrier.wait()  # maximise the overlap rather than hope for it
+            barrier.wait(timeout=self.BARRIER_TIMEOUT)
             if bucket.try_consume(cost):
                 with lock:
                     wins.append(1)
@@ -153,7 +159,10 @@ class TestTokenBucketUnderConcurrency(unittest.TestCase):
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            thread.join(timeout=self.JOIN_TIMEOUT)
+        stuck = [t.name for t in threads if t.is_alive()]
+        if stuck:
+            raise AssertionError(f"{len(stuck)} thread(s) never finished: {stuck}")
         return len(wins)
 
     def test_a_bucket_with_no_refill_is_never_oversold(self):

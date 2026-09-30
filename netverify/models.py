@@ -64,10 +64,23 @@ class Verdict:
     command_id: str
     command: str
     platform: str
+    #: What the sanitizer found in the caller's own text, as `kind`/`severity`
+    #: pairs and nothing else. Present because masking without reporting is
+    #: security theatre: an operator who pasted a credential into a chat window
+    #: needs to be *told*, not quietly protected. The matched text is never
+    #: included - that is the whole reason the finding carries only two short
+    #: vocabulary strings.
     check: str
     observed: str
     reasons: tuple[str, ...] = ()
     arguments: dict[str, str] = field(default_factory=dict)
+    #: What the sanitizer found in the caller's own text, as `kind`/`severity`
+    #: pairs and nothing else. Present because masking without reporting is
+    #: security theatre: an operator who pasted a credential into a chat window
+    #: needs to be *told*, not quietly protected. The matched text is never
+    #: included - that is the whole reason the finding carries only two short
+    #: vocabulary strings.
+    findings: tuple[tuple[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +93,8 @@ class Verdict:
             "observed": self.observed,
             "reasons": list(self.reasons),
             "arguments": dict(self.arguments),
+            # Two short vocabulary strings per finding, never the matched text.
+            "findings": [{"kind": kind, "severity": severity} for kind, severity in self.findings],
         }
 
 

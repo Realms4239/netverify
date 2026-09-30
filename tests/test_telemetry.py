@@ -490,7 +490,7 @@ class TestInstrumentCreationIsThreadSafe(_MetricsCase):
         start = threading.Barrier(threads_count)
 
         def record():
-            start.wait()
+            start.wait(timeout=30.0)
             for _ in range(per_thread):
                 self.telemetry.record_refused(self.telemetry.REASON_BAD_ARGUMENT)
 
@@ -498,7 +498,9 @@ class TestInstrumentCreationIsThreadSafe(_MetricsCase):
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            thread.join(timeout=60.0)
+        stuck = [t.name for t in threads if t.is_alive()]
+        self.assertEqual(stuck, [], "worker threads never finished - the barrier hung")
 
         series = self._series(self.telemetry.METRIC_REFUSED)
         self.assertEqual(sum(series.values()), threads_count * per_thread)
@@ -510,7 +512,7 @@ class TestInstrumentCreationIsThreadSafe(_MetricsCase):
         start = threading.Barrier(8)
 
         def record():
-            start.wait()
+            start.wait(timeout=30.0)
             self.telemetry.record_verdict("ping", "pass")
 
         threads = [threading.Thread(target=record) for _ in range(8)]

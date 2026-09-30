@@ -102,10 +102,12 @@ MUTATIONS: list[tuple[str, str, str, str, bool]] = [
         # Matches the check as it stands, which tests the *raw* value rather than
         # the stripped one. That rename was the fix for a leading tab being
         # silently stripped and accepted, so an anchor written against the old
-        # stripped form no longer exists and the mutation reports as stale
-        # rather than testing anything.
-        '    if any(ch in value for ch in "\\r\\n\\t"):',
-        "    if False:  # MUTANT: allow control characters",
+        # stripped form no longer exists and the mutation reports as stale rather
+        # than testing anything. Re-anchored again when the check widened from
+        # three characters to `isprintable()`; the same trap, the third time this
+        # line has moved under a mutation.
+        "    if not value.isprintable():",
+        "    if False:  # MUTANT: allow every control character",
         "control-character defence in depth is removed",
         # Now caught, and the reason is worth recording. It was previously
         # tolerated on the grounds that the argument patterns already reject any
@@ -153,6 +155,44 @@ MUTATIONS: list[tuple[str, str, str, str, bool]] = [
         "metrics stop being exported in the deployment the traces are exported to",
         False,
     ),
+    (
+        # The control-character gap: the check tested for three characters while
+        # its docstring claimed to refuse line breaks, so U+2028 and friends got
+        # through into text an agent reads. Found by a probe with a patternless
+        # field, because the registry patterns were hiding it.
+        "netverify/scope.py",
+        "    if not value.isprintable():",
+        '    if any(ch in value for ch in "\\r\\n\\t"):  # MUTANT: narrow rule again',
+        "U+2028 and other Unicode line breaks forge an extra line in the verdict",
+        False,
+    ),
+    (
+        # Both of these are the incident rehearsal's findings, and both are the
+        # same shape of mistake: a bare boolean where the meaning needed two
+        # values. "Not in the text" and "in the text and down" are different
+        # facts, and collapsing them tells an operator their link is down when
+        # the tool never saw it.
+        "netverify/registry.py",
+        # Anchored on the absence branch alone rather than the whole call, so this
+        # survives an edit that reformats the checker above it.
+        "    if not _mentions(output, interface):",
+        "    if False:  # MUTANT: absence is a network fault again",
+        "an interface missing from the capture is reported as down, not unreadable",
+        False,
+    ),
+    (
+        # Anchored on the *assignment*, not the initialiser. Mutating
+        # `findings = ()` above it is a no-op - the branch reassigns it on the next
+        # line - and the harness proved that by reporting a survivor, which is the
+        # only reason a toothless mutation gets noticed at all.
+        "netverify/verify.py",
+        "            findings = tuple(\n"
+        '                (finding.kind, finding.severity) for finding in scan(request["output"])\n'
+        "            )",
+        "            findings = ()  # MUTANT: never reported",
+        "a leaked credential is masked but never told to the operator",
+        False,
+    ),
 ]
 
 
@@ -190,6 +230,7 @@ def main() -> int:
         print(f"baseline green; applying {len(MUTATIONS)} mutations\n")
 
         survived: list[str] = []
+        stale: list[str] = []
         tolerated = 0
         for index, (relative, original, replacement, description, ok) in enumerate(
             MUTATIONS, start=1
@@ -197,8 +238,15 @@ def main() -> int:
             target = work / relative
             text = target.read_text(encoding="utf-8")
             if original not in text:
-                survived.append(f"{index:2d}. {relative}: anchor moved ({description})")
-                print(f"{index:2d}. STALE  {description}")
+                # Kept separate from `survived` on purpose. A surviving mutant means
+                # the suite would not notice a bug, and the fix is a test. A stale
+                # anchor means the mutation was *never applied*, so the suite was
+                # never asked, and the fix is to re-anchor it. Reporting both as
+                # "survived" sends whoever reads the output to write a test for a gap
+                # that does not exist, while the real problem - a mutation list that
+                # has drifted from the code - goes unmentioned.
+                stale.append(f"{index:2d}. {relative}: {description}")
+                print(f"{index:2d}. STALE    {description}   <-- anchor moved, never applied")
                 continue
 
             target.write_text(text.replace(original, replacement, 1), encoding="utf-8")
@@ -217,8 +265,17 @@ def main() -> int:
                 survived.append(f"{index:2d}. {relative}: {description}")
 
     print()
+    if stale:
+        print(f"MUTATION TEST FAILED: {len(stale)} mutation(s) never applied (stale anchor)")
+        for item in stale:
+            print(f"  - {item}")
+        print(
+            "\nA stale anchor means the code moved and the mutation list did not, so "
+            "the suite was never asked the question. Re-anchor it; writing a new test "
+            "for it would be answering a question nobody asked."
+        )
     if survived:
-        print(f"MUTATION TEST FAILED: {len(survived)} mutant(s) survived")
+        print(f"\nMUTATION TEST FAILED: {len(survived)} mutant(s) survived")
         for item in survived:
             print(f"  - {item}")
         print(
@@ -226,6 +283,7 @@ def main() -> int:
             "Either add a test that catches it, or mark it tolerated with the "
             "reason it is acceptable."
         )
+    if stale or survived:
         return 1
 
     print(

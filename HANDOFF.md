@@ -86,10 +86,40 @@ is a `Literal` of method names; `CacheableMethod.TOOLS_LIST` raises
 `AttributeError` at import. The SDK validates keys at construction, so a typo
 would otherwise be a hint that silently applies to nothing.
 
-## Next work
+## Found by hunting, not by a failing gate
 
-1. **Nothing is in flight from this cycle.** All five requested items are done
-   and gated; commit before starting anything new.
+Three defects that every existing test agreed were fine. Recorded because the
+*shape* of them is the lesson, not the instances.
+
+**A control that tested three characters while documenting a rule about line
+breaks.** `_require_text` refused `\r\n\t`; U+2028, U+2029, NEL, VT and FF all
+passed, and each is a line break to a terminal, a JSON renderer or a Markdown
+engine. The registry patterns hid it - they are a separate dict from the
+arguments, so the next patternless argument would have had no defence at all. Now
+`isprintable()`, which is the rule the docstring always claimed.
+
+**A bare boolean where the meaning needed two values.** `srl_interface_is_up()`
+returns `True` or `False`, so "not in this text" and "in this text and down" are
+indistinguishable to it. An operator who asked about `ethernet-1/6` and pasted a
+capture that scrolled past it was told the link was **down**. That is the mirror
+image of the failure the README calls most dangerous, and it pages people. The
+parsers are vendored and byte-pinned by the parity gate, so the classification
+now happens in `registry.py`, which owns the meaning. Same fix for OSPF, BGP,
+routes and ping.
+
+**Masking without reporting.** `verify` sanitised the caller's text and returned a
+clean verdict, so a credential in the capture was protected and *silent*. The
+operator never learned they had pasted a password into a chat window. Every
+verdict now carries `findings` - `kind` and `severity` only, never the matched
+text. It costs about 75ms on a maximal capture, which is why that cost is written
+down next to the code rather than left for someone to rediscover as a regression.
+
+All three are mutation-pinned, and all three were found by a probe or a rehearsal
+rather than by reasoning about the code.
+
+## Work queued, in order
+
+1. **Nothing above is uncommitted** - commit before starting anything new.
 2. Scratch files `mut.txt`, `o*.txt`, `pid.txt` in the repo root are runner
    output, not source. Do not commit them.
 3. If progress notifications are ever extended to another tool, the two bridges
