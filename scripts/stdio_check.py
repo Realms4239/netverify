@@ -12,7 +12,7 @@ So this launches the actual process, sends real JSON-RPC, and asserts three
 things:
 
 1. the server answers `server/discover` and advertises 2026-07-28
-2. `tools/list` returns the four tools, each annotated read-only
+2. `tools/list` returns the seven tools, each annotated read-only
 3. every byte the server wrote to stdout parses as JSON-RPC. This is the real
    assertion; the rest is context.
 

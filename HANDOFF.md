@@ -21,7 +21,7 @@ credentials, opens no sockets, and cannot mutate a device. Version 1.2.0.
 
 ## Verified state
 
-Full gate set green after the second hardening pass described below:
+Full gate set green at `31939c2`, and re-verified unchanged this round:
 
 ```
 370 tests · 46/46 evals · ruff check · ruff format · bandit -ll ·
@@ -312,10 +312,12 @@ not writing instrumentation.
 2. **No client host has been confirmed to support the Final SEP-2640
    extension.** Untested against a real host. Now the only gap in this area:
    our own wire behaviour is proven, a third party's is not.
-3. **Not thread-safe.** Bucket is module-global, `AuditLog` writes to a shared
-   stream. Stress-tested at 250k iterations with `sys.setswitchinterval` and
-   found no over-issue — *not claimed as a defect* — but a `threading.Lock`
-   closes it for near-zero cost.
+3. **Shared mutable state is lock-guarded; rate limiting remains per-process.**
+   `TokenBucket`, `AuditLog`, and lazy telemetry instruments use `threading.Lock`
+   around their global updates, and dedicated concurrency tests race exact budget
+   debits, atomic audit lines, and one-time instrument creation. This is not a
+   claim that every future global will be safe by default—only that the current
+   process-wide sinks are explicitly serialized, with witnesses in the suite.
 4. **Rate limiting is per-process.** Correct for single-process stdio; needs
    shared state before any multi-replica move. Stated as a limitation in the
    security resource rather than papered over.
@@ -391,7 +393,21 @@ python -m bandit -q -r netverify server scripts -ll -x netverify\parsers
 
 ## Committed this cycle
 
+The current cycle (`fd21b69` through `31939c2`) is fully represented by the
+latest commit subjects:
+
+```sh
+31939c2 Ask for a skill that is not there, and the answer was silence.
+669b647 Read a verdict as "down" and you page someone at 3am about a healthy link. Read it as "healthy" and you hide a dead one. Both are wrong, and the first version of this fix traded the first for the second.
+e73ad9a Stop reporting a fault for text the tool never saw
+1ed5adc Prove the progress notifications reach a real client
+0abaccb Export the metrics in the configuration we actually deploy in
+6a7e6e9 Instrument the library, and make its refusals countable
+fd21b69 Rewrite the handoff: verify status instead of inheriting it
 ```
+
+The earlier entries in this repository are:
+
 90a1a99  Prove the installed wheel works, and accept --json on either side
 6238e27  Refuse a mistyped argument instead of answering from it
 0de091c  Fix three defects stress testing found, and guard them
