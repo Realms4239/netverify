@@ -46,7 +46,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from mcp.server.extension import Extension, MethodBinding
-from mcp_types import RequestParams
+from mcp.shared.exceptions import MCPError
+from mcp_types import INTERNAL_ERROR, INVALID_PARAMS, RequestParams
 
 #: Where the served skills live. Resolved relative to the repository rather than
 #: the CWD, so the server works from any working directory - and from a wheel,
@@ -67,7 +68,42 @@ MAX_SKILL_BYTES = 16 * 1024 * 1024
 
 
 class SkillError(ValueError):
-    """A skill on disk that cannot be served."""
+    """A skill that cannot be served: a URI naming no skill, or one past a limit.
+
+    Carries a JSON-RPC `code` because of *where* this is raised, which is the
+    whole subtlety. `load_skills()` runs at startup, where raising is the point -
+    a half-loaded catalogue is worse than none, because a host cannot tell a
+    missing skill from one that was never written. The same class is also raised
+    from request handlers, and there the SDK turns *only* an `MCPError` into a
+    response; see `_as_protocol_error` for what happens otherwise.
+    """
+
+    def __init__(self, message: str, code: int = INVALID_PARAMS) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _as_protocol_error(exc: SkillError) -> MCPError:
+    """`SkillError` as the error the client actually receives.
+
+    The SDK's dispatcher maps exactly two exception types onto the wire: an
+    `MCPError` carries its own `ErrorData`, and a pydantic `ValidationError`
+    becomes INVALID_PARAMS. Everything else maps to nothing, and the stdio runner
+    logs the traceback and writes *no response at all* - so an agent resolving a
+    `skill://` URI that names nothing waits out its own timeout instead of being
+    told, and cannot tell that from a server that has wedged.
+
+    That is not hypothetical. This is the single most likely call an agent makes
+    against this extension, because a URI arrives from wherever the user pasted
+    it, and it was found here by asking the question over a real pipe rather than
+    in-process, where the in-process test passed.
+
+    The code is the caller's fault (`INVALID_PARAMS`) when the URI names no skill,
+    matching the SDK's own `ResourceNotFoundError` mapping for "you named
+    something that is not there", and the server's fault (`INTERNAL_ERROR`) when
+    the skill on disk is past a limit a host must accept.
+    """
+    return MCPError(code=exc.code, message=str(exc))
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -156,13 +192,15 @@ class Skill:
         if len(files) > MAX_SKILL_RESOURCES:
             raise SkillError(
                 f"{self.name} has {len(files)} resources, above the "
-                f"{MAX_SKILL_RESOURCES} a conforming host must accept"
+                f"{MAX_SKILL_RESOURCES} a conforming host must accept",
+                code=INTERNAL_ERROR,
             )
         total = sum(f.size for f in files)
         if total > MAX_SKILL_BYTES:
             raise SkillError(
                 f"{self.name} is {total} bytes, above the {MAX_SKILL_BYTES}-byte "
-                "limit a conforming host must accept"
+                "limit a conforming host must accept",
+                code=INTERNAL_ERROR,
             )
         return {
             "uri": self.uri,
@@ -271,22 +309,28 @@ class SkillsExtension(Extension):
         return {"directoryRead": False, "skills": sorted(self.skills)}
 
     async def list_skills(self, ctx: Any, params: Any) -> dict[str, Any]:
-        return {
-            "resultType": "complete",
-            "skills": [skill.entry() for skill in self.skills.values()],
-        }
+        try:
+            return {
+                "resultType": "complete",
+                "skills": [skill.entry() for skill in self.skills.values()],
+            }
+        except SkillError as exc:
+            raise _as_protocol_error(exc) from exc
 
     async def get_skill(self, ctx: Any, params: Any) -> dict[str, Any]:
-        uri = params.uri if hasattr(params, "uri") else params.get("uri", "")
-        name = _name_from_uri(str(uri))
-        skill = self.skills.get(name)
-        if skill is None:
-            # A clear refusal naming what *is* available, rather than a bare
-            # "not found" the caller has to guess its way out of.
-            raise SkillError(
-                f"no skill is served at {uri!r}. Available: {sorted(self.skills) or 'none'}"
-            )
-        return {"resultType": "complete", "skill": skill.entry()}
+        try:
+            uri = params.uri if hasattr(params, "uri") else params.get("uri", "")
+            name = _name_from_uri(str(uri))
+            skill = self.skills.get(name)
+            if skill is None:
+                # A clear refusal naming what *is* available, rather than a bare
+                # "not found" the caller has to guess its way out of.
+                raise SkillError(
+                    f"no skill is served at {uri!r}. Available: {sorted(self.skills) or 'none'}"
+                )
+            return {"resultType": "complete", "skill": skill.entry()}
+        except SkillError as exc:
+            raise _as_protocol_error(exc) from exc
 
     def methods(self) -> Any:
         return (

@@ -16,6 +16,16 @@ things:
 3. every byte the server wrote to stdout parses as JSON-RPC. This is the real
    assertion; the rest is context.
 
+That list has since grown, and every addition is one that could not have been
+written from an in-process test: the prompt, the skill resource, the progress
+notifications, the audit correlation, and the two SEP-2640 extension methods. The
+skills methods earned their place immediately - the block that asks `skills/get`
+for a URI naming no skill found that the server answered with *silence*. An
+extension handler that raises anything but `MCPError` produces no response at all
+on this transport, so a mistyped skill URI looks to a client exactly like a wedged
+server. In-process, the same call raised a clean exception and everything looked
+fine, which is the strongest argument yet for having this script.
+
 The 2026-07-28 revision removed the `initialize` handshake, so there is no
 handshake to perform - the protocol version travels in `_meta` on every request,
 which is exactly what this script does.
@@ -30,9 +40,22 @@ import os
 import pathlib
 import subprocess
 import sys
+import threading
+
+#: The spec's invalid-params code, imported rather than written out as a literal so
+#: this script cannot drift from the SDK's own mapping. Used to assert that a
+#: refusal is a *client* error: a host has to be able to tell a mistyped URI from
+#: a server fault, and the code is how it does that.
+from mcp_types import INVALID_PARAMS
 
 PROTOCOL_VERSION = "2026-07-28"
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+#: How long to wait for a refusal before deciding the server will never send one.
+#: Generous, because the server may be mid-startup on a cold interpreter, but
+#: bounded, because "no response at all" is a real failure mode of this extension
+#: and a gate that waits forever reports it as a mystery timeout instead.
+REFUSAL_TIMEOUT = 15.0
 
 #: Real output from the `ping` checker, inlined rather than imported: this script
 #: runs against a *subprocess* server and must not depend on the test tree.
@@ -191,6 +214,139 @@ def main() -> int:
             elif "sanitize_device_output" not in text:
                 failures.append("the served skill lost its sanitise-first instruction")
 
+        # The two SEP-2640 extension methods, over the real pipe. This block
+        # exists because the in-process tests were blind to a defect that only
+        # appears on the wire: `skills/get` for a URI naming no skill raised a
+        # bare `ValueError`, the SDK maps only `MCPError` onto the wire, and the
+        # stdio runner's answer to anything else is to log a traceback and write
+        # *no response at all*. Over a pipe that is a client hanging until its own
+        # timeout, unable to tell a refusal from a wedged server - and it is the
+        # one call an agent is most likely to get wrong, because the URI arrives
+        # from wherever the user pasted it rather than from our own listing.
+        process.stdin.write(_request(5, "skills/list"))
+        process.stdin.flush()
+        entries: list = []
+        try:
+            listing = json.loads(process.stdout.readline().decode("utf-8"))["result"]
+            entries = listing["skills"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, UnicodeDecodeError) as exc:
+            failures.append(f"skills/list did not return a catalogue: {exc}")
+        else:
+            if listing.get("resultType") != "complete":
+                failures.append(f"skills/list resultType is {listing.get('resultType')!r}")
+            advertised = {e["frontmatter"]["name"] for e in entries}
+            if advertised != {"triage-backbone"}:
+                failures.append(f"skills/list advertised {sorted(advertised)}")
+            for entry in entries:
+                # Progressive disclosure: the entry is metadata and digests, not
+                # the document. A host handed the body here has loaded the whole
+                # skill to decide whether it wants it, which is what the split is
+                # meant to avoid.
+                if "body" in entry:
+                    failures.append(
+                        f"the {entry['uri']} entry carries the skill body, so a host "
+                        f"loads the document to decide whether it wants it"
+                    )
+                if not entry.get("resources"):
+                    failures.append(f"{entry['uri']} lists no resources, so it is unusable")
+                for resource in entry.get("resources", []):
+                    digest = str(resource.get("digest", ""))
+                    if not digest.startswith("sha256:"):
+                        failures.append(f"{resource.get('uri')} has no sha256 digest: {digest!r}")
+
+        # SEP-2640 requires `skills/get` to resolve a URI the caller never listed,
+        # because a host may hand a model a URI from anywhere. Asked for the bare
+        # name rather than the full path, which is the harder case: the extension
+        # has to derive the name from the URI itself.
+        process.stdin.write(
+            _frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "skills/get",
+                    "params": {"_meta": dict(CLIENT_META), "uri": "skill://triage-backbone"},
+                }
+            )
+        )
+        process.stdin.flush()
+        try:
+            got = json.loads(process.stdout.readline().decode("utf-8"))["result"]["skill"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, UnicodeDecodeError) as exc:
+            failures.append(f"skills/get did not resolve an unlisted URI: {exc}")
+        else:
+            if got.get("frontmatter", {}).get("name") != "triage-backbone":
+                failures.append(f"skills/get returned the wrong skill: {got.get('uri')}")
+            # The two methods must agree. A host that lists and then gets a
+            # different digest for the same file cannot cache anything, and would
+            # report the skill as changed on every call.
+            if entries and got.get("resources") != entries[0].get("resources"):
+                failures.append("skills/get and skills/list disagree about the skill's resources")
+
+        # The refusal, over the wire. Asserted as a *response* carrying an error
+        # code because silence is the failure: a bare exception from a handler
+        # produces no reply, which a client experiences as a hang.
+        process.stdin.write(
+            _frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "skills/get",
+                    "params": {"_meta": dict(CLIENT_META), "uri": "skill://nope/SKILL.md"},
+                }
+            )
+        )
+        process.stdin.flush()
+        # Bounded, because silence is the failure this block exists to catch, and
+        # a blocking read would turn a caught bug into a *hung gate* - worse than a
+        # failing one, since the job would then die on a timeout with no message
+        # naming the cause. A watchdog kills the server if it does not answer, so
+        # the read returns empty and the assertion below reports it by name.
+        watchdog = threading.Timer(REFUSAL_TIMEOUT, process.kill)
+        watchdog.start()
+        refusal_line = process.stdout.readline()
+        watchdog.cancel()
+        if not refusal_line:
+            failures.append(
+                "skills/get for an unknown skill produced NO response; a client would "
+                "hang rather than be told, and could not tell that from a wedged server"
+            )
+        else:
+            try:
+                refusal = json.loads(refusal_line.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                failures.append(f"the refusal was not JSON-RPC: {exc}")
+            else:
+                error = refusal.get("error")
+                if not error:
+                    failures.append(f"an unknown skill returned a result, not an error: {refusal}")
+                elif error.get("code") != INVALID_PARAMS:
+                    failures.append(
+                        f"an unknown skill answered {error.get('code')}, not {INVALID_PARAMS}; "
+                        f"a host cannot tell a typo from a server fault"
+                    )
+                elif "triage-backbone" not in str(error.get("message", "")):
+                    failures.append(
+                        "the refusal does not name what *is* available, so the caller has "
+                        f"to guess: {error.get('message')!r}"
+                    )
+
+        # And the connection has to survive it. A handler that killed the dispatch
+        # loop would pass every assertion above for the requests that came first,
+        # so this is asked explicitly: one more ordinary request, after the error.
+        process.stdin.write(_request(8, "skills/list"))
+        process.stdin.flush()
+        survivor = process.stdout.readline()
+        try:
+            survivors = json.loads(survivor.decode("utf-8"))["result"]["skills"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, UnicodeDecodeError) as exc:
+            failures.append(
+                f"the server stopped answering after a refused skills/get: "
+                f"{exc or 'no response at all'}"
+            )
+        else:
+            if not survivors:
+                failures.append("skills/list answered after the refusal, but with no catalogue")
+
         # Progress notifications, over the real wire, with a real token. This has
         # to live here for the same reason the audit correlation below does: the
         # unit tests drive the tool function and the SDK's worker thread, but
@@ -334,10 +490,21 @@ def main() -> int:
                 if unknown:
                     failures.append(f"audit lines for an unknown request id: {unknown}")
 
-    except BrokenPipeError:
+    # `OSError` rather than `BrokenPipeError` specifically, because a server that
+    # has died leaves the pipe in a state Windows reports as `EINVAL` and POSIX
+    # reports as `EPIPE`, and a gate that tracebacks instead of printing its
+    # failures has thrown away the diagnosis it just collected.
+    except OSError:
         failures.append("the server closed stdout before answering; it likely crashed")
     finally:
-        process.stdin and process.stdin.close()
+        # Every step here is best-effort and must not raise. A server that has
+        # already died leaves the pipe unusable, and an exception out of `finally`
+        # replaces the failure list this script just built with a traceback that
+        # says nothing about what was actually wrong.
+        try:
+            process.stdin and process.stdin.close()
+        except OSError:  # pragma: no cover - the pipe is already gone
+            pass
         process.terminate()
         try:
             process.wait(timeout=10)
@@ -357,6 +524,8 @@ def main() -> int:
     print(f"  {len(progress_seen)} progress notifications reached stdout before the result")
     print("  prompts/list returned the triage workflow over the wire")
     print("  resources/read served the skill as text, not base64")
+    print("  skills/list returned the catalogue, and skills/get resolved an unlisted URI")
+    print(f"  an unknown skill URI was refused with {INVALID_PARAMS}, and the server kept serving")
     return 0
 
 

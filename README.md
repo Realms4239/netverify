@@ -346,7 +346,7 @@ rather than letting them harden into false confidence:
 ## Development
 
 ```sh
-python -m unittest discover -s tests -t .   # 369 tests, stdlib only
+python -m unittest discover -s tests -t .   # 370 tests, stdlib only
 python evals/run_evals.py                   # 46 eval cases
 python scripts/smoke_test.py                # MCP round trip, in-memory
 python scripts/stdio_check.py               # real process, real pipe
@@ -360,6 +360,15 @@ rather than on every pull request. `NETVERIFY_AUDIT=0` silences the audit log,
 which defaults to on because an audit log nobody knows is off is still a control
 - but which would otherwise bury a test run in thousands of JSON lines and teach
 people to ignore stderr entirely.
+
+**What the stdio gate is for.** `scripts/stdio_check.py` is the only gate that runs
+the real process over a real pipe, and the defects it has found are all invisible
+in-process. Printing to stdout corrupts the protocol channel. Progress
+notifications can be computed and never sent. The audit log can fail to correlate.
+And the SEP-2640 methods answered a refusal with *silence* — the SDK maps only
+`MCPError` onto the wire, so a handler raising anything else produces no response
+at all, which over stdio is a client hanging rather than a client being told. If a
+question can only be asked of the real transport, it belongs in this script.
 
 ## CI
 

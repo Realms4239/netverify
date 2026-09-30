@@ -217,6 +217,23 @@ MUTATIONS: list[tuple[str, str, str, str, bool]] = [
         "a leaked credential is masked but never told to the operator",
         False,
     ),
+    (
+        # The SEP-2640 wire bug: the refusal has to leave as an `MCPError` or it
+        # does not leave at all. Anchored on `get_skill`'s own return line rather
+        # than on the shared `except` clause, because the identical clause in
+        # `list_skills` comes first and the harness replaces only the first match.
+        # (An earlier attempt anchored on the closing paren of the `raise` above
+        # it and was STALE: that paren is indented sixteen spaces, not twelve.)
+        "server/skills.py",
+        '            return {"resultType": "complete", "skill": skill.entry()}\n'
+        "        except SkillError as exc:\n"
+        "            raise _as_protocol_error(exc) from exc",
+        '            return {"resultType": "complete", "skill": skill.entry()}\n'
+        "        except SkillError:\n"
+        "            raise  # MUTANT: the refusal never reaches the wire",
+        "an unknown skill URI is refused with silence instead of a JSON-RPC error",
+        False,
+    ),
 ]
 
 

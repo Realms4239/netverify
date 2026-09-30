@@ -24,8 +24,8 @@ credentials, opens no sockets, and cannot mutate a device. Version 1.2.0.
 Full gate set green after the second hardening pass described below:
 
 ```
-369 tests · 46/46 evals · ruff check · ruff format · bandit -ll ·
-zero-dependency · mutation 19/19 · smoke · parity · stdio · wheel-install
+370 tests · 46/46 evals · ruff check · ruff format · bandit -ll ·
+zero-dependency · mutation 20/20 · smoke · parity · stdio · wheel-install
 ```
 
 ## What the five requested items actually are
@@ -160,6 +160,25 @@ invariant and that `verify()` still returns a verdict. It had to be named to sor
 after the class that creates the bad state, because `loadTestsFromModule` orders
 classes alphabetically.
 
+**A third finding, and the gate itself was the victim.** Closing the "never run
+over the wire" gap above needed a guard that could *detect* silence — and the first
+version could not, because it used a blocking `readline()`. Against the unfixed
+server the gate hung rather than failed, so the job would have died on a timeout
+with no message naming the cause. Three layers fixed it, and each was found by
+running the guard against the bug rather than by reasoning about it:
+
+- a watchdog bounds the wait and kills the server, so silence surfaces as an
+  empty read and the failure is reported by name;
+- the outer handler catches `OSError`, not just `BrokenPipeError`, because Windows
+  reports a dead pipe as `EINVAL` and POSIX as `EPIPE`;
+- the `finally` cleanup no longer raises, because an exception there replaced the
+  whole failure list with a traceback that said nothing about the actual fault.
+
+Verified in both directions: with the fix reverted the gate prints
+*"skills/get for an unknown skill produced NO response; a client would hang rather
+than be told, and could not tell that from a wedged server"*, and with the fix in
+place it passes.
+
 **A toothless mutation.** The `findings` mutation was anchored on `findings = ()` —
 an initialiser the next line reassigns, so mutating it changed nothing and the
 harness reported a survivor. Re-anchored on the assignment. Two mutations were
@@ -277,12 +296,22 @@ not writing instrumentation.
 
 ## Known risks and open questions
 
-1. **`skills/list` and `skills/get` have never run over the real stdio
-   JSON-RPC wire.** Exercised in-process only. `scripts/stdio_check.py` covers
-   `resources/read` for the skill but not the two extension methods.
-   **Cheapest high-value fix available.**
+1. ~~**`skills/list` and `skills/get` have never run over the real stdio
+   JSON-RPC wire.**~~ **Closed, and it found a shippability blocker.** Both methods
+   now run over a real pipe in `scripts/stdio_check.py`, and the first thing that
+   asked was: `skills/get` for a URI naming no skill. It raised a bare
+   `SkillError` (a `ValueError`), and the SDK's dispatcher maps **only** `MCPError`
+   onto the wire — anything else is logged as a crash and gets *no response at
+   all*. Over stdio that is a client hanging until its own timeout, unable to
+   distinguish a refusal from a wedged server, on the single call an agent is most
+   likely to get wrong because the URI comes from wherever the user pasted it.
+   In-process the same call raised a clean exception and every test passed.
+   Fixed by converting at the handler boundary (`_as_protocol_error`), and the
+   refusal is now `-32602` with the available skills named. See the "A third
+   finding" section for why the gate itself needed hardening too.
 2. **No client host has been confirmed to support the Final SEP-2640
-   extension.** Untested against a real host.
+   extension.** Untested against a real host. Now the only gap in this area:
+   our own wire behaviour is proven, a third party's is not.
 3. **Not thread-safe.** Bucket is module-global, `AuditLog` writes to a shared
    stream. Stress-tested at 250k iterations with `sys.setswitchinterval` and
    found no over-issue — *not claimed as a defect* — but a `threading.Lock`
@@ -315,10 +344,10 @@ cd C:\work\hardened-mcp-evals
 $env:NETVERIFY_AUDIT = '0'          # silences the audit log during tests
 $env:PYTHONIOENCODING = 'utf-8'     # em-dashes crash cp1252 output
 
-python -m unittest discover -s tests -t .   # 369 tests
+python -m unittest discover -s tests -t .   # 370 tests
 python evals/run_evals.py                   # 46/46
 python scripts/check_wheel_install.py       # build + install + run
-python scripts/mutation_test.py             # 19/19
+python scripts/mutation_test.py             # 20/20
 python scripts/stdio_check.py
 python scripts/smoke_test.py
 python scripts/check_upstream_parity.py

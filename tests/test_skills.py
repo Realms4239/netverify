@@ -373,16 +373,41 @@ class TestExtensionSurface(unittest.TestCase):
         self.assertEqual(got["skill"]["frontmatter"]["name"], "triage-backbone")
 
     def test_get_on_an_unknown_skill_names_what_is_available(self):
+        """The refusal has to reach the wire, which changes what is raised.
+
+        This used to assert `SkillError`, and it was right about the *intent* and
+        wrong about the *contract*. The SDK maps only `MCPError` onto the wire; a
+        bare `ValueError` from an extension handler is logged as a crash and gets
+        no response at all, so over a real pipe this was a client hanging rather
+        than a client being told. Found by `scripts/stdio_check.py` asking for a
+        URI that names no skill, which no in-process test ever did.
+        """
         import asyncio
+
+        from mcp.shared.exceptions import MCPError
+        from mcp_types import INVALID_PARAMS
 
         extension = self.server._extensions[0]  # noqa: SLF001
 
         class Params:
             uri = "skill://nope/SKILL.md"
 
-        with self.assertRaises(SkillError) as caught:
+        with self.assertRaises(MCPError) as caught:
             asyncio.run(extension.get_skill(None, Params()))
+        # An `MCPError` and not merely its message: the exception *type* is the
+        # whole fix, since the dispatcher branches on it and nothing else.
+        self.assertEqual(caught.exception.code, INVALID_PARAMS)
         self.assertIn("triage-backbone", str(caught.exception))
+
+    def test_a_refusal_is_still_a_skill_error_internally(self):
+        """The conversion must not lose the type the rest of the code catches.
+
+        `load_skills()` raises `SkillError` at startup and several tests assert
+        that, so the handlers converting to `MCPError` must not change what the
+        parsing and loading paths raise.
+        """
+        self.assertTrue(issubclass(SkillError, ValueError))
+        self.assertEqual(SkillError("x").code, -32602)
 
 
 if __name__ == "__main__":
