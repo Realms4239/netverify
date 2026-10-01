@@ -114,6 +114,27 @@ silence — per-step reads are now bounded at 90s with concurrent stderr
 drain, so a slow start reads as a wait and a real death is quoted verbatim.
 A favicon route was added because a browser 404 reads as a console error.
 
+### Wrap-up round: hardening + the console as a service
+
+The final pass split the page into `dashboard.html` + `console.css` +
+`console.js` and hardened `demo/live_server.py` (details in `DESIGN.md` →
+"Hardening" and `demo/README.md`). The suites grew with it: endpoint checks
+are 11/11 (security headers incl. a `Server: netverify` banner with no
+interpreter version, 400/413 body validation, static-whitelist traversal
+refusals, `/api/health`) and browser checks are 10/10 (zero inline script,
+external assets only, measured footer status line, still zero console
+errors — which under the strict CSP means zero CSP violations too). Two
+debug lessons from this round: a 413 that refuses *before* draining the
+request body can abort the client mid-upload on Windows — drain up to a
+bounded limit, then refuse and close if anything remains; and a strict CSP
+will catch inline `style=""` attributes that no review noticed — let it.
+
+The stdio proof now runs **seven** wire steps: the two hardening probes are
+the mutating command (refused, never silent) and an unknown tool name
+(answered with an error, never silent). The one-lock rule means a second
+overlapping proof gets 409 — the browser button disables during flight
+anyway.
+
 The interpreter note above applies to the live server too: it is the hermes
 venv or nothing, and `python -m server` inside the wire proof resolves from
 its cwd (the repo root), never `sys.path[0]`.

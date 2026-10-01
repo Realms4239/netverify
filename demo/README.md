@@ -45,7 +45,9 @@ Runs a stdlib `ThreadingHTTPServer` on `127.0.0.1:8765` that holds one
 persistent `ClientSession` to the real server over the SDK's in-memory
 transport (one background asyncio loop; every HTTP handler thread funnels its
 call through `run_coroutine_threadsafe`, because `ClientSession` is not
-thread-safe). Endpoints:
+thread-safe). The page ships as `dashboard.html` + `console.css` +
+`console.js` (no inline script — the server sends a strict CSP), served
+alongside `favicon.svg` from a fixed whitelist. Endpoints:
 
 - **`GET /`** — serves `dashboard.html`.
 - **`GET /api/bootstrap`** — protocol version, the 7 tools with schemas and
@@ -59,13 +61,23 @@ thread-safe). Endpoints:
 - **`POST /api/stdio-proof`** — spawns `python -m server` as a real
   subprocess, pipes newline-delimited JSON-RPC to its stdin, and returns
   every frame in both directions with per-step latency plus assertions.
-  Six steps: `server/discover`, `tools/list`, a valid `tools/call`, a refused
-  `tools/call` (asserted as *an answer, not silence*), `prompts/list`,
-  `skills/list`. This is the defence that the server really works: stdout is
-  the protocol channel, so a stray print or a handler that never answers is
-  visible here by name, frame by frame.
+  Seven steps: `server/discover`, `tools/list`, a valid `tools/call`, a
+  refused `tools/call` (asserted as *an answer, not silence*), `prompts/list`,
+  `skills/list`, and an unknown tool name (must be answered with an error,
+  never silence). One proof runs at a time; an overlapping request gets 409.
 - **`GET /api/telemetry`** — spans (newest slice), collected metrics, and the
   library's telemetry status, for the page's 3-second poll.
+- **`GET /api/health`** — measured service status only: protocol version,
+  session kind, uptime.
+
+Hardening, because the console should not itself be a liability: request
+bodies are size-capped (413, with a bounded drain so clients get the answer
+cleanly) and JSON-validated (400 with the parse position); static files come
+from a whitelist, so no request path is ever joined onto a directory;
+unexpected errors return a short message plus an id while the detail goes to
+stderr; the `Server` header says `netverify`, not the interpreter version;
+and the strict CSP (no inline script or style anywhere) is enforced by the
+browser and by the zero-console-error gate.
 
 ### `obs.py`
 

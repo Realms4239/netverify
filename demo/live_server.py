@@ -15,11 +15,21 @@ two ways, and the dashboard renders what comes back:
 2. **A real subprocess over a real pipe** (`POST /api/stdio-proof`) - spawns
    `python -m server` exactly the way a host would, sends newline-delimited
    JSON-RPC over stdin, and returns every frame in both directions with its
-   latency. This is the defence that the server *really works*: stdout is the
-   protocol channel, so a stray print or a handler that never answers is
-   visible here by name, frame by frame.
+   latency. Seven steps, including a mutating command (must be refused) and
+   an unknown tool name (must be answered with an error) - the two requests
+   a careless handler answers with silence.
 
 Run:  python demo/live_server.py  (then open the printed URL)
+
+Hardening, because a console that proves a server should not itself be a
+liability: strict CSP with the page split into externally served css/js (no
+inline script, so `script-src 'self'` is honest); static files served from a
+fixed whitelist, so no request path is ever joined onto a directory; request
+bodies size-capped and JSON-validated with 400/413 answers; unexpected
+errors return a short message and an id while the detail goes to stderr,
+never to the page; the stdio proof holds a lock so it cannot be stacked;
+keep-alive HTTP/1.1 with a 30s socket timeout; and the `Server` header says
+"netverify" rather than advertising the interpreter version.
 
 stdlib HTTP; the only imports beyond the tree are `mcp` and `opentelemetry`,
 which the venv already carries.
@@ -35,6 +45,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -48,10 +59,42 @@ DEMO = pathlib.Path(__file__).resolve().parent
 ROOT = DEMO.parent
 DASHBOARD = DEMO / "dashboard.html"
 
-PROTOCOL_VERSION = "2026-07-28"
+HOST = "127.0.0.1"
+PORT = 8765
+#: Tool arguments and captures are small; 1 MiB is generous. A body over the
+#: cap is refused with 413 - but up to DRAIN_LIMIT bytes are read and
+#: discarded first, so the client finishes sending and receives the 413
+#: cleanly instead of watching the connection die mid-upload. Beyond that
+#: limit the remainder is unread and the connection is closed after the
+#: response (size must not be a memory lever either way).
+MAX_BODY_BYTES = 1_048_576
+DRAIN_LIMIT = 8 * 1024 * 1024
+STARTED = time.monotonic()
+
+#: Static assets are served from a fixed whitelist: a request path is looked
+#: up as a key and never joined onto a directory. The path-traversal class of
+#: bug needs a join to exist; here there is none.
+STATIC = {
+    "/console.css": (DEMO / "console.css", "text/css; charset=utf-8"),
+    "/console.js": (DEMO / "console.js", "text/javascript; charset=utf-8"),
+    "/favicon.svg": (DEMO / "favicon.svg", "image/svg+xml"),
+}
+
+#: The page is served with no inline script or style (they live in
+#: /console.js and /console.css), so this policy needs no unsafe fallbacks.
+CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; "
+    "connect-src 'self'; img-src 'self'; base-uri 'none'; "
+    "frame-ancestors 'none'; form-action 'none'"
+)
+
+#: One stdio proof at a time. Each one spawns an interpreter; a second
+#: overlapping request is refused (409) rather than stacked.
+_STDIO_LOCK = threading.Lock()
+
 CLIENT_META = {
-    "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
-    "io.modelcontextprotocol/clientInfo": {"name": "netverify-live-demo", "version": "1.2.0"},
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": {"name": "netverify-live-demo", "version": "1.3.0"},
     "io.modelcontextprotocol/clientCapabilities": {},
 }
 
@@ -281,6 +324,10 @@ def stdio_proof() -> dict:
         ),
         (5, "prompts/list", None),
         (6, "skills/list", None),
+        # MCP hardening, on the wire: a tool name that does not exist must be
+        # answered with an error, never silence - a client that hangs here
+        # cannot tell a typo from a wedged server.
+        (7, "tools/call", {"name": "no_such_tool", "arguments": {}}),
     ]
     env = {**__import__("os").environ, "NETVERIFY_AUDIT": "1"}
     process = subprocess.Popen(  # noqa: S603
@@ -291,6 +338,10 @@ def stdio_proof() -> dict:
         env=env,
         cwd=str(ROOT),  # the child resolves `-m server` from its cwd, not ours
     )
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        process.kill()
+        raise RuntimeError("could not open pipes to the server subprocess")
+
     frames: list[dict] = []
     assertions: list[dict] = []
 
@@ -302,13 +353,11 @@ def stdio_proof() -> dict:
     stderr_buf: list[bytes] = []
 
     def pump_stdout() -> None:
-        assert process.stdout
         for line in iter(process.stdout.readline, b""):
             stdout_q.put(line)
         stdout_q.put(None)  # EOF sentinel
 
     def pump_stderr() -> None:
-        assert process.stderr
         for chunk in iter(lambda: process.stderr.read(1) or None, None):
             stderr_buf.append(chunk)
 
@@ -319,7 +368,6 @@ def stdio_proof() -> dict:
         return (b"".join(stderr_buf).decode("utf-8", "replace")[-limit:]).strip()
 
     try:
-        assert process.stdin
         for mid, method, extra in steps:
             process.stdin.write(_request(mid, method, extra))
             process.stdin.flush()
@@ -382,6 +430,18 @@ def stdio_proof() -> dict:
                     if decoded.get("result") is not None or "error" in decoded
                     else "no refusal"
                 )
+            if method == "tools/call" and mid == 7:
+                # An unknown tool name may be answered with a protocol error
+                # or a tool error result; both are answers. Neither is silence.
+                err = decoded.get("error")
+                result = decoded.get("result") or {}
+                refused_ok = isinstance(err, dict) or result.get("isError") is True
+                assertions[-1]["ok"] = refused_ok
+                assertions[-1]["detail"] = (
+                    "unknown tool answered with an error, not silence"
+                    if refused_ok
+                    else "unknown tool returned a result"
+                )
     finally:
         try:
             if process.stdin:
@@ -394,53 +454,129 @@ def stdio_proof() -> dict:
         "frames": frames,
         "assertions": assertions,
         "all_answered": all(a["ok"] for a in assertions),
-        "protocol_version": PROTOCOL_VERSION,
+        "protocol_version": CLIENT_META["io.modelcontextprotocol/protocolVersion"],
     }
 
 
 # --------------------------------------------------------------------------
 # stdlib HTTP surface
 # --------------------------------------------------------------------------
+class BodyError(Exception):
+    """A request body the server will not accept, with the status to return."""
+
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class Handler(BaseHTTPRequestHandler):
+    server_version = "netverify"  # do not advertise the interpreter version
+    sys_version = ""
+    protocol_version = "HTTP/1.1"  # keep-alive; every reply carries Content-Length
+    timeout = 30  # a connection that sends nothing is closed, not held
+
+    def version_string(self) -> str:
+        # The stdlib joins server_version + ' ' + sys_version, which leaves a
+        # trailing space when sys_version is empty.
+        return self.server_version
+
     def _send(self, code: int, body: bytes, ctype: str) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
     def _json(self, obj: dict, code: int = 200) -> None:
         self._send(code, json.dumps(obj, default=str).encode("utf-8"), "application/json")
 
+    def _server_error(self, exc: Exception) -> None:
+        # The page gets a short message and an id; the detail goes to stderr.
+        # A diagnostic console is not entitled to leak its own stack to
+        # whoever can reach it.
+        err_id = uuid.uuid4().hex[:8]
+        print(f"[error {err_id}] {type(exc).__name__}: {exc}", file=sys.stderr)
+        self._json({"error": f"internal error ({err_id})"}, 500)
+
+    def _read_json_body(self) -> dict:
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            return {}
+        try:
+            length = int(raw)
+        except ValueError as exc:
+            raise BodyError("Content-Length is not an integer") from exc
+        if length < 0:
+            raise BodyError("Content-Length is negative")
+        if length > MAX_BODY_BYTES:
+            remaining = min(length, DRAIN_LIMIT)
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break  # the client gave up first; nothing more to drain
+                remaining -= len(chunk)
+            if length > DRAIN_LIMIT:
+                self.close_connection = True  # unread remainder: no keep-alive
+            raise BodyError(f"body exceeds {MAX_BODY_BYTES} bytes", 413)
+        data = self.rfile.read(length) if length else b""
+        if not data:
+            return {}
+        try:
+            parsed = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise BodyError(f"body is not valid JSON: {exc.msg} (line {exc.lineno})") from exc
+        if not isinstance(parsed, dict):
+            raise BodyError("body must be a JSON object")
+        return parsed
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib naming
-        if self.path in ("/", "/index.html"):
-            self._send(200, DASHBOARD.read_bytes(), "text/html; charset=utf-8")
-        elif self.path == "/favicon.ico":
-            # Browsers ask for this unprompted; a 404 here is a console error
-            # the dashboard did not cause.
-            self._send(204, b"", "image/x-icon")
-        elif self.path == "/api/bootstrap":
-            try:
+        try:
+            if self.path in ("/", "/index.html"):
+                self._send(200, DASHBOARD.read_bytes(), "text/html; charset=utf-8")
+            elif self.path in STATIC:
+                path, ctype = STATIC[self.path]
+                self._send(200, path.read_bytes(), ctype)
+            elif self.path == "/favicon.ico":
+                # Legacy browsers ask for this unprompted; a 404 here is a
+                # console error the dashboard did not cause.
+                self._send(204, b"", "image/x-icon")
+            elif self.path == "/api/bootstrap":
                 self._json(bootstrap())
-            except Exception as exc:  # noqa: BLE001
-                self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
-        elif self.path == "/api/telemetry":
-            spans, total = obs.snapshot_spans()
-            self._json(
-                {
-                    "spans": spans[-120:],
-                    "total_spans": total,
-                    "metrics": obs.snapshot_metrics(),
-                    "status": obs.telemetry_status(),
-                }
-            )
-        else:
-            self._json({"error": "not found"}, 404)
+            elif self.path == "/api/health":
+                # Only measured values: a status page that cannot lie.
+                self._json(
+                    {
+                        "status": "ok",
+                        "protocol_version": BRIDGE.protocol_version if BRIDGE else None,
+                        "session": "in-memory",
+                        "uptime_s": round(time.monotonic() - STARTED, 1),
+                    }
+                )
+            elif self.path == "/api/telemetry":
+                spans, total = obs.snapshot_spans()
+                self._json(
+                    {
+                        "spans": spans[-120:],
+                        "total_spans": total,
+                        "metrics": obs.snapshot_metrics(),
+                        "status": obs.telemetry_status(),
+                    }
+                )
+            else:
+                self._json({"error": "not found"}, 404)
+        except BodyError as exc:
+            self._json({"error": str(exc)}, exc.status)
+        except Exception as exc:  # noqa: BLE001
+            self._server_error(exc)
 
     def do_POST(self) -> None:  # noqa: N802
-        length = int(self.headers.get("Content-Length", "0"))
-        body = json.loads(self.rfile.read(length) or b"{}")
         try:
+            body = self._read_json_body()
             if self.path == "/api/call":
                 self._json(
                     do_call(
@@ -448,11 +584,19 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 )
             elif self.path == "/api/stdio-proof":
-                self._json(stdio_proof())
+                if not _STDIO_LOCK.acquire(blocking=False):
+                    self._json({"error": "a stdio proof is already running"}, 409)
+                    return
+                try:
+                    self._json(stdio_proof())
+                finally:
+                    _STDIO_LOCK.release()
             else:
                 self._json({"error": "not found"}, 404)
+        except BodyError as exc:
+            self._json({"error": str(exc)}, exc.status)
         except Exception as exc:  # noqa: BLE001
-            self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+            self._server_error(exc)
 
     def log_message(self, fmt: str, *args) -> None:  # keep stdout quiet
         pass
@@ -461,8 +605,8 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     global BRIDGE
     BRIDGE = McpBridge()
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
-    print("netverify live demo:  http://127.0.0.1:8765")
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    print(f"netverify console:  http://{HOST}:{PORT}")
     print(f"protocol {BRIDGE.protocol_version} · in-memory session up · telemetry live")
     try:
         server.serve_forever()
