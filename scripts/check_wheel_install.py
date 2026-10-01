@@ -36,6 +36,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import pathlib
 import shutil
@@ -81,8 +82,24 @@ def main() -> int:
         venv = work / "venv"
 
         print("=== 1. build the wheel ===")
-        built = _run(
-            [
+        # A stale `build/` directory from a previous in-tree build breaks this
+        # one with "Cannot create a file already exists" on the dist-info dir
+        # - which reads like a packaging bug but is a leftover artifact. The
+        # directory is a gitignored intermediate, so clearing it is safe and
+        # the gate's verdict stays about the wheel, not about the tree's age.
+        stale_build = ROOT / "build"
+        if stale_build.is_dir():
+            shutil.rmtree(stale_build)
+        # `--no-build-isolation` uses the *current* environment's setuptools,
+        # which keeps the gate runnable offline - but Python 3.12 stopped
+        # bundling setuptools, so a runner without it died here with
+        # `Cannot import 'setuptools.build_meta'` while the 3.11 leg passed,
+        # making a packaging-environment bug look like a 3.12 bug. So: use the
+        # environment's backend when it exists, and when it does not, fall back
+        # to the build-system `pyproject.toml` already declares (build
+        # isolation fetches setuptools>=68 into a private env).
+        if importlib.util.find_spec("setuptools") is not None:
+            build_args = [
                 sys.executable,
                 "-m",
                 "pip",
@@ -92,9 +109,20 @@ def main() -> int:
                 "--no-build-isolation",
                 "-w",
                 str(dist),
-            ],
-            cwd=ROOT,
-        )
+            ]
+        else:
+            print("  setuptools not found here; building via the declared build-system")
+            build_args = [
+                sys.executable,
+                "-m",
+                "pip",
+                "wheel",
+                ".",
+                "--no-deps",
+                "-w",
+                str(dist),
+            ]
+        built = _run(build_args, cwd=ROOT)
         if built.returncode != 0:
             print(built.stdout[-1500:], file=sys.stderr)
             print(built.stderr[-1500:], file=sys.stderr)
