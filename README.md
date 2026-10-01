@@ -285,6 +285,28 @@ The tool signature is deliberately explicit rather than `**kwargs`, because the
 SDK derives the input schema from it and a catch-all becomes a required
 `kwargs` property. The trade-off is documented in `server/app.py`.
 
+## The dashboard
+
+A static report generated from the demos — every number on it is measured
+output — is deployed to GitHub Pages:
+
+**https://realms4239.github.io/netverify/**
+
+The **live console** is more interesting and runs locally, because it drives
+the real server in-process and over stdio and nothing static can do that:
+
+```sh
+pip install -e ".[mcp]"
+python demo/live_server.py        # then open http://127.0.0.1:8765
+```
+
+Point it at the sample captures, run a verdict, watch the protocol transcript
+show every JSON-RPC frame both directions (including the refused call and the
+unknown-tool probe), and read the telemetry each call produced. The design
+system and its enforcement are documented in [DESIGN.md](DESIGN.md); the
+endpoints and the hardening of the console server itself are in
+[demo/README.md](demo/README.md).
+
 ## The eval gate
 
 `evals/` is 46 declarative cases across four kinds — verify, sanitize, scan,
@@ -451,3 +473,22 @@ matter what arrives. The same principle applies to batches: `verify_many` is
 capped at 200 entries, and `verify_capture` is charged per item rather than a flat
 token, so a runaway agent loop cannot route around the budget by choosing the
 batch tool.
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+short version of how this repo is run. The two rules that matter most:
+
+1. **New checks are one `CommandSpec`.** If a change edits the allowlist and a
+   handler in lockstep, the design is being bypassed — the registry is the seam.
+2. **Anything that changes the MCP surface changes `tests/test_contract.py`**
+   in the same commit. A renamed tool that passes behaviour tests is still a
+   breaking change for every client.
+
+## License
+
+[MIT](LICENSE). The vendored parser (`netverify/parsers/upstream.py`) is a
+byte-identical copy of the same author's `pyats/parsers.py` at a pinned commit
+in [`isp-network-as-code`](https://github.com/Realms4239/isp-network-as-code),
+which carries no license file; `scripts/check_upstream_parity.py` fails the
+build if the copy and its provenance header ever diverge.
