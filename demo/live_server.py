@@ -378,7 +378,7 @@ def stdio_proof() -> dict:
                 # A refusal is an *answer*. The assertion is that SOMETHING
                 # came back - silence is the failure mode this exists to catch.
                 assertions[-1]["detail"] = (
-                    "refused on the wire (an answer, not silence)"
+                    "refused - an answer, not silence"
                     if decoded.get("result") is not None or "error" in decoded
                     else "no refusal"
                 )

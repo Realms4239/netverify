@@ -74,11 +74,18 @@ the gates" means that interpreter.
 
 ### The live console (added after the demonstrability round)
 
-The static report above is a recording. `demo/live_server.py` + the
-redesigned `demo/dashboard.html` (Ferrari design system, `DESIGN-ferrari.md`,
-Tailwind) are the live demonstration, and they are verified end to end:
-7/7 endpoint checks and 7/7 headless-browser checks against the running
-server, zero console errors, full gate set green with the new files in tree.
+The static report above is a recording. `demo/live_server.py` +
+`demo/dashboard.html` are the live demonstration, verified end to end
+against the running server with zero console errors and the full gate set
+green. The page was first styled as a Ferrari-theme statement, then
+overhauled into the current **modest instrument** design — the design system
+is now `DESIGN.md`, and its browser suite asserts the design contract
+(tokens, a11y, zero external requests) alongside behaviour: 9/9 checks.
+Two earlier design decisions were deliberately reversed in that overhaul;
+do not reintroduce them: no CDN dependencies (Tailwind is gone — the page is
+hand-written CSS and works air-gapped), no marketing hero or oversized
+spec numerals (the intro is two sentences plus one facts line, and every
+count shown is measured at runtime).
 
 - **In-process usage:** a persistent `ClientSession` over the SDK's
   in-memory transport drives real `tools/call`, `resources/read` and
