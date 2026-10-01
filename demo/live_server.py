@@ -92,6 +92,12 @@ CSP = (
 #: overlapping request is refused (409) rather than stacked.
 _STDIO_LOCK = threading.Lock()
 
+#: A localhost console is a target for DNS rebinding: a web page can point a
+#: hostname it owns at 127.0.0.1 and, same-origin rules then satisfied, read
+#: whatever this server returns and invoke its tools. Refusing any Host but
+#: this console's kills that class outright, and costs one header comparison.
+_ALLOWED_HOSTS = {f"{HOST}:{PORT}", f"localhost:{PORT}"}
+
 CLIENT_META = {
     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
     "io.modelcontextprotocol/clientInfo": {"name": "netverify-live-demo", "version": "1.3.0"},
@@ -166,6 +172,14 @@ class McpBridge:
 
 BRIDGE: McpBridge | None = None
 
+#: One measurement window at a time. `do_call` slices telemetry by a cursor,
+#: so two concurrent calls would each read the other's spans and counter
+#: deltas, and the dashboard would attribute work to the wrong request - a
+#: stress harness caught exactly that (a 3-span call reporting 28). The calls
+#: are pure functions over text measured in milliseconds, so serialising them
+#: costs nothing and makes the attribution exact.
+_CALL_LOCK = threading.Lock()
+
 
 def _tool_brief(tool) -> dict:
     return {
@@ -184,88 +198,90 @@ def _tool_brief(tool) -> dict:
 
 
 def bootstrap() -> dict:
-    tools = BRIDGE.list_tools()
-    resources = BRIDGE.list_resources()
-    templates = BRIDGE.list_resource_templates()
-    prompts = BRIDGE.list_prompts()
-    self_check = BRIDGE.call_tool("self_check", {})
-    return {
-        "protocol_version": BRIDGE.protocol_version,
-        "tools": [_tool_brief(t) for t in tools.tools],
-        "resources": [{"uri": str(r.uri), "name": r.name} for r in resources.resources],
-        "templates": [{"uri_template": t.uri_template} for t in templates.resource_templates],
-        "prompts": [{"name": p.name, "description": p.description} for p in prompts.prompts],
-        "self_check": self_check.structured_content,
-        "telemetry": obs.telemetry_status(),
-        "samples": SAMPLES,
-    }
+    with _CALL_LOCK:
+        tools = BRIDGE.list_tools()
+        resources = BRIDGE.list_resources()
+        templates = BRIDGE.list_resource_templates()
+        prompts = BRIDGE.list_prompts()
+        self_check = BRIDGE.call_tool("self_check", {})
+        return {
+            "protocol_version": BRIDGE.protocol_version,
+            "tools": [_tool_brief(t) for t in tools.tools],
+            "resources": [{"uri": str(r.uri), "name": r.name} for r in resources.resources],
+            "templates": [{"uri_template": t.uri_template} for t in templates.resource_templates],
+            "prompts": [{"name": p.name, "description": p.description} for p in prompts.prompts],
+            "self_check": self_check.structured_content,
+            "telemetry": obs.telemetry_status(),
+            "samples": SAMPLES,
+        }
 
 
 def do_call(kind: str, name: str, arguments: dict) -> dict:
     """One real round-trip, with the spans it produced and the metrics it moved."""
-    cursor = obs.reset_span_cursor()
-    before_metrics = {
-        (m["name"], tuple(sorted(m["attributes"].items()))): m for m in obs.snapshot_metrics()
-    }
-    t0 = time.perf_counter()
-    try:
-        if kind == "tool":
-            result = BRIDGE.call_tool(name, arguments)
-            payload = {
-                "is_error": result.is_error,
-                "structured": result.structured_content,
-                "text": "\n".join(c.text for c in result.content if getattr(c, "text", None)),
-            }
-        elif kind == "resource":
-            result = BRIDGE.read_resource(name)
-            payload = {
-                "is_error": False,
-                "structured": None,
-                "text": "\n".join(
-                    c.text if isinstance(c.text, str) else "<blob>" for c in result.contents
-                ),
-            }
-        elif kind == "prompt":
-            rendered = BRIDGE.get_prompt(name, arguments)
-            payload = {
-                "is_error": False,
-                "structured": None,
-                "text": "\n---\n".join(
-                    f"{m.role}: {m.content.text}"
-                    for m in rendered.messages
-                    if getattr(m.content, "text", None)
-                ),
-            }
-        else:
-            raise ValueError(f"unknown kind {kind!r}")
-    except Exception as exc:  # noqa: BLE001 - a refusal is a result, not a crash
-        payload = {
-            "is_error": True,
-            "structured": None,
-            "text": f"{type(exc).__name__}: {exc}",
+    with _CALL_LOCK:
+        cursor = obs.reset_span_cursor()
+        before_metrics = {
+            (m["name"], tuple(sorted(m["attributes"].items()))): m for m in obs.snapshot_metrics()
         }
-    elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+        t0 = time.perf_counter()
+        try:
+            if kind == "tool":
+                result = BRIDGE.call_tool(name, arguments)
+                payload = {
+                    "is_error": result.is_error,
+                    "structured": result.structured_content,
+                    "text": "\n".join(c.text for c in result.content if getattr(c, "text", None)),
+                }
+            elif kind == "resource":
+                result = BRIDGE.read_resource(name)
+                payload = {
+                    "is_error": False,
+                    "structured": None,
+                    "text": "\n".join(
+                        c.text if isinstance(c.text, str) else "<blob>" for c in result.contents
+                    ),
+                }
+            elif kind == "prompt":
+                rendered = BRIDGE.get_prompt(name, arguments)
+                payload = {
+                    "is_error": False,
+                    "structured": None,
+                    "text": "\n---\n".join(
+                        f"{m.role}: {m.content.text}"
+                        for m in rendered.messages
+                        if getattr(m.content, "text", None)
+                    ),
+                }
+            else:
+                raise ValueError(f"unknown kind {kind!r}")
+        except Exception as exc:  # noqa: BLE001 - a refusal is a result, not a crash
+            payload = {
+                "is_error": True,
+                "structured": None,
+                "text": f"{type(exc).__name__}: {exc}",
+            }
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
 
-    spans, _total = obs.snapshot_spans(cursor)
-    after = obs.snapshot_metrics()
-    deltas = []
-    for m in after:
-        key = (m["name"], tuple(sorted(m["attributes"].items())))
-        before = before_metrics.get(key)
-        if m.get("is_histogram"):
-            continue
-        old = before["value"] if before else 0
-        if m["value"] != old:
-            deltas.append({**m, "delta": m["value"] - old})
-    return {
-        "kind": kind,
-        "name": name,
-        "arguments": arguments,
-        "elapsed_ms": elapsed_ms,
-        "result": payload,
-        "spans": spans,
-        "metric_deltas": deltas,
-    }
+        spans, _total = obs.snapshot_spans(cursor)
+        after = obs.snapshot_metrics()
+        deltas = []
+        for m in after:
+            key = (m["name"], tuple(sorted(m["attributes"].items())))
+            before = before_metrics.get(key)
+            if m.get("is_histogram"):
+                continue
+            old = before["value"] if before else 0
+            if m["value"] != old:
+                deltas.append({**m, "delta": m["value"] - old})
+        return {
+            "kind": kind,
+            "name": name,
+            "arguments": arguments,
+            "elapsed_ms": elapsed_ms,
+            "result": payload,
+            "spans": spans,
+            "metric_deltas": deltas,
+        }
 
 
 # --------------------------------------------------------------------------
@@ -534,8 +550,26 @@ class Handler(BaseHTTPRequestHandler):
             raise BodyError("body must be a JSON object")
         return parsed
 
+    def _reject_host(self) -> bool:
+        """True when the request's Host is not this console, replied and done.
+
+        An HTTP/1.1 client always sends Host, so None means a hand-rolled
+        client - refused the way the spec says (400). A foreign Host gets 403:
+        the request is valid but this server does not answer to that name.
+        """
+        host = self.headers.get("Host")
+        if host is None:
+            self._json({"error": "missing Host header"}, 400)
+            return True
+        if host not in _ALLOWED_HOSTS:
+            self._json({"error": f"refused: this console answers {HOST}:{PORT} only"}, 403)
+            return True
+        return False
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib naming
         try:
+            if self._reject_host():
+                return
             if self.path in ("/", "/index.html"):
                 self._send(200, DASHBOARD.read_bytes(), "text/html; charset=utf-8")
             elif self.path in STATIC:
@@ -576,7 +610,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
+            # The body is drained before the Host is judged: rejecting first
+            # would leave an unread body on a keep-alive connection.
             body = self._read_json_body()
+            if self._reject_host():
+                return
             if self.path == "/api/call":
                 self._json(
                     do_call(

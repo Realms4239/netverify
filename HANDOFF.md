@@ -135,6 +135,29 @@ the mutating command (refused, never silent) and an unknown tool name
 overlapping proof gets 409 — the browser button disables during flight
 anyway.
 
+### Stress round (the last pass before wrap-up)
+
+A 9-probe harness (concurrency, malformed HTTP, fuzzing, bucket exhaustion
+to 650 calls, hostile and Unicode arguments, Host attacks) ran against the
+live server and found two real defects, both fixed and both worth not
+re-learning:
+
+1. **Telemetry attribution under concurrency.** `/api/call` slices spans by
+   a cursor, and concurrent calls read each other's work — a 3-span verify
+   reported 28. The calls and `bootstrap()` are serialized under one lock:
+   attribution is now exact (asserted per response), and the cost is zero
+   for a single-operator console.
+2. **DNS rebinding.** A localhost console without a Host allowlist answers
+   pages that point a foreign hostname at 127.0.0.1. Foreign Host → 403,
+   missing Host → 400.
+
+Two probes needed honesty fixes rather than server fixes: the token bucket
+(400 burst + 10/s refill) cannot be exhausted by 40 calls — real exhaustion
+takes ~650 through HTTP, and then refusals are honest `rate_limited`; and
+the caller's own echoed arguments are not a leak — the masking promise is
+judged on the tool *result*. The harness is `stress_harness.py` (kept out of
+the repo; the gates it asserts are documented here).
+
 The interpreter note above applies to the live server too: it is the hermes
 venv or nothing, and `python -m server` inside the wire proof resolves from
 its cwd (the repo root), never `sys.path[0]`.

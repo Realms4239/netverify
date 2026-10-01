@@ -92,6 +92,14 @@ that proves a server must not itself be a liability:
   "netverify", never the interpreter version.
 - **One proof at a time**: the stdio proof spawns an interpreter, so a
   second overlapping request is answered 409 rather than stacked.
+- **One measurement window at a time**: `/api/call` slices telemetry by a
+  cursor, so concurrent calls used to read each other's spans and counter
+  deltas (a stress harness caught a 3-span call reporting 28). Calls and
+  bootstrap are serialized under one lock; attribution is now exact.
+- **The Host header must be this console's** (`127.0.0.1:8765` or
+  `localhost:8765`): DNS rebinding lets a web page point a name it owns at
+  127.0.0.1 and, same-origin rules satisfied, read responses and invoke
+  tools. A foreign Host gets 403, a missing one 400.
 - **HTTP/1.1 keep-alive with a 30s socket timeout**: a connection that
   sends nothing is closed, not held.
 - **No assert() control flow**: startup invariants are explicit raises;
