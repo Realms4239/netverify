@@ -72,6 +72,45 @@ bare `python` on this machine resolves to a managed 3.13 without them and
 reports 15 phantom import errors and 78 skips. Every command in "How to run
 the gates" means that interpreter.
 
+### The live console (added after the demonstrability round)
+
+The static report above is a recording. `demo/live_server.py` + the
+redesigned `demo/dashboard.html` (Ferrari design system, `DESIGN-ferrari.md`,
+Tailwind) are the live demonstration, and they are verified end to end:
+7/7 endpoint checks and 7/7 headless-browser checks against the running
+server, zero console errors, full gate set green with the new files in tree.
+
+- **In-process usage:** a persistent `ClientSession` over the SDK's
+  in-memory transport drives real `tools/call`, `resources/read` and
+  `prompts/get`; `POST /api/call` returns the result, the spans that call
+  produced and the counters it moved. Verified: a valid verify returns
+  `outcome: pass` with 3 spans (SDK SERVER span + `netverify.verify` + the
+  client-side send span) and a `netverify.verdicts` delta; `configure
+  terminal` returns `is_error: true` with `[reason=not_in_allowlist]`.
+- **Wire proof:** `POST /api/stdio-proof` spawns `python -m server` as a
+  real subprocess and returns every JSON-RPC frame both directions with
+  latency; all six steps answered, including the refusal — asserted as *an
+  answer, not silence*, which is the failure mode only a real pipe can show.
+- **Observability is real:** `demo/obs.py` installs the OpenTelemetry SDK
+  providers before any netverify/server import and never swaps them; the
+  telemetry section reads the SDK's own in-memory exporters, so the numbers
+  on the page are the numbers recorded. The `metrics_state:
+  not-configured` chip is honest (env-based export is unconfigured; the
+  in-memory host provider is collecting) — do not fake it.
+
+Two traps this round cost real time; both are fixed in the code and worth
+not re-learning: `process.communicate()` returns **two** values, so a
+`_, err, _ =` unpack silently discarded the child's stderr (the EOF branch
+looked informative and said nothing); and a cold `python -m server` on
+Windows took **28.6s** to its first answer, which a 20s watchdog reported as
+silence — per-step reads are now bounded at 90s with concurrent stderr
+drain, so a slow start reads as a wait and a real death is quoted verbatim.
+A favicon route was added because a browser 404 reads as a console error.
+
+The interpreter note above applies to the live server too: it is the hermes
+venv or nothing, and `python -m server` inside the wire proof resolves from
+its cwd (the repo root), never `sys.path[0]`.
+
 ## What the five requested items actually are
 
 Two of the five were **already done**. Verified, not assumed — check before

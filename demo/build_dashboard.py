@@ -242,8 +242,8 @@ def main() -> int:
 </body>
 </html>
 """
-    (DEMO / "dashboard.html").write_text(page, encoding="utf-8")
-    print("wrote demo/dashboard.html")
+    (DEMO / "static_report.html").write_text(page, encoding="utf-8")
+    print("wrote demo/static_report.html")
     return 0
 
 

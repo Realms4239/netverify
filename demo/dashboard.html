@@ -3,37 +3,440 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>netverify — live demonstration &amp; stress results</title>
+<title>netverify — live console</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        canvas: "#181818", elevated: "#303030", hairline: "#303030",
+        ink: "#ffffff", body: "#969696", muted: "#666666",
+        rosso: "#da291c", "rosso-active": "#b01e0a",
+        success: "#03904a", warn: "#f13a2c", info: "#4c98b9",
+        mono: "#8f8f8f",
+      },
+      fontFamily: {
+        sans: ["Inter", "system-ui", "sans-serif"],
+        code: ["'JetBrains Mono'", "monospace"],
+      },
+    },
+  },
+};
+</script>
+<style>
+  html { background: #181818; }
+  body { font-family: Inter, system-ui, sans-serif; }
+  .caption-u { font-size: 11px; font-weight: 600; letter-spacing: 1.1px; text-transform: uppercase; }
+  .btn-u { font-size: 14px; font-weight: 700; letter-spacing: 1.4px; text-transform: uppercase; }
+  .display { font-weight: 500; letter-spacing: -1.6px; }
+  .spec-num { font-size: 64px; font-weight: 700; letter-spacing: -1.6px; line-height: 1; }
+  @media (min-width: 1024px) { .spec-num { font-size: 80px; } }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #303030; }
+  ::-webkit-scrollbar-track { background: #181818; }
+</style>
 </head>
-<body style="margin:0;background:#0d1117;color:#e6edf3;font-family:-apple-system,'Segoe UI',Roboto,sans-serif">
-<div style="max-width:1180px;margin:0 auto;padding:36px 24px 60px">
+<body class="bg-canvas text-ink antialiased">
 
-<div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px">
-<div>
-<h1 style="margin:0;font-size:26px;letter-spacing:-0.5px">netverify <span style="color:#8b949e;font-weight:400">1.2.0</span></h1>
-<div style="color:#8b949e;font-size:13px;margin-top:4px">read-only MCP verifier for ISP backbone output · commit 603fc60 · every value on this page is measured output, not a claim</div>
-</div>
-<span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;color:#3fb950;background:#3fb95018;border:1px solid #3fb95044">ALL SCENARIOS PASS · 6/6</span>
-</div>
+<!-- ============ TOP NAV ============ -->
+<nav class="h-16 bg-canvas border-b border-hairline flex items-center px-6 lg:px-12 gap-8 sticky top-0 z-50">
+  <a href="#" class="btn-u text-sm">NETVERIFY<span class="text-rosso">.</span></a>
+  <div class="hidden md:flex gap-6 text-[13px] font-semibold uppercase tracking-[0.65px] text-body">
+    <a href="#console" class="text-ink">Console</a>
+    <a href="#proof">Wire proof</a>
+    <a href="#telemetry">Telemetry</a>
+  </div>
+  <div class="ml-auto flex items-center gap-3">
+    <span id="nav-protocol" class="caption-u text-mono hidden sm:inline">—</span>
+    <span id="nav-live" class="inline-flex items-center gap-2 bg-elevated rounded-full px-3 py-1 caption-u text-body">
+      <span id="live-dot" class="w-2 h-2 rounded-full bg-muted inline-block"></span><span id="live-label">Connecting</span>
+    </span>
+  </div>
+</nav>
 
-<h2 style="font-size:15px;margin:30px 0 12px;color:#e6edf3">Automated gates — this build</h2>
-<div style="display:flex;flex-wrap:wrap;gap:8px"><span style="display:inline-flex;flex-direction:column;gap:2px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px"><span style="font-size:11px;color:#8b949e">unittest suite</span><span style="font-size:12.5px;font-weight:700;color:#3fb950">370 tests ✓</span></span> <span style="display:inline-flex;flex-direction:column;gap:2px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px"><span style="font-size:11px;color:#8b949e">evals</span><span style="font-size:12.5px;font-weight:700;color:#3fb950">46/46 ✓</span></span> <span style="display:inline-flex;flex-direction:column;gap:2px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px"><span style="font-size:11px;color:#8b949e">stdio wire gate</span><span style="font-size:12.5px;font-weight:700;color:#3fb950">extensions answered ✓</span></span> <span style="display:inline-flex;flex-direction:column;gap:2px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px"><span style="font-size:11px;color:#8b949e">smoke test</span><span style="font-size:12.5px;font-weight:700;color:#3fb950">7 tools ✓</span></span> <span style="display:inline-flex;flex-direction:column;gap:2px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px"><span style="font-size:11px;color:#8b949e">upstream parity</span><span style="font-size:12.5px;font-weight:700;color:#3fb950">byte-identical ✓</span></span> <span style="display:inline-flex;flex-direction:column;gap:2px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px"><span style="font-size:11px;color:#8b949e">zero-dependency</span><span style="font-size:12.5px;font-weight:700;color:#3fb950">stdlib only ✓</span></span> <span style="display:inline-flex;flex-direction:column;gap:2px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px"><span style="font-size:11px;color:#8b949e">ruff</span><span style="font-size:12.5px;font-weight:700;color:#3fb950">clean ✓</span></span> <span style="display:inline-flex;flex-direction:column;gap:2px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px"><span style="font-size:11px;color:#8b949e">bandit -ll</span><span style="font-size:12.5px;font-weight:700;color:#3fb950">clean ✓</span></span> <span style="display:inline-flex;flex-direction:column;gap:2px;padding:8px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px"><span style="font-size:11px;color:#8b949e">mutation</span><span style="font-size:12.5px;font-weight:700;color:#3fb950">21/21 caught ✓</span></span></div>
+<!-- ============ HERO ============ -->
+<header class="px-6 lg:px-12 pt-24 pb-16 max-w-[1280px] mx-auto">
+  <p class="caption-u text-rosso mb-6">Live demonstration · not a recording</p>
+  <h1 class="display text-5xl md:text-7xl lg:text-[80px] leading-[1.05]">Proof, not prose.<br><span class="text-body">Every number on this page is a call that just happened.</span></h1>
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-8 mt-16 border-t border-hairline pt-8">
+    <div><div id="spec-tools" class="spec-num">—</div><div class="caption-u text-body mt-3">Tools on the wire</div></div>
+    <div><div id="spec-resources" class="spec-num">—</div><div class="caption-u text-body mt-3">Resources + skill</div></div>
+    <div><div id="spec-verdicts" class="spec-num text-rosso">0</div><div class="caption-u text-body mt-3">Verdicts measured · this session</div></div>
+    <div><div id="spec-spans" class="spec-num">0</div><div class="caption-u text-body mt-3">Spans collected · OpenTelemetry</div></div>
+  </div>
+</header>
 
-<h2 style="font-size:15px;margin:30px 0 12px;color:#e6edf3">Wrap-up demo — the operator story <span style="color:#8b949e;font-weight:400;font-size:12px">demo/transcript.txt · exits 0</span></h2>
-<div style="display:flex;flex-wrap:wrap;gap:10px"><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px;flex:1;min-width:340px"><div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><div style="font-size:13px;font-weight:600;color:#e6edf3;margin-bottom:6px"></div><div style="font-family:ui-monospace,monospace;font-size:11px;color:#f85149;white-space:nowrap"></div></div><div style="background:#0d1117;border-radius:6px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace"><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap"></div></div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px;flex:1;min-width:340px"><div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><div style="font-size:13px;font-weight:600;color:#e6edf3;margin-bottom:6px">A healthy interface is reported healthy.</div><div style="font-family:ui-monospace,monospace;font-size:11px;color:#3fb950;white-space:nowrap">[exit 0]</div></div><div style="background:#0d1117;border-radius:6px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace"><div style="color:#8b949e;font-size:12.5px;line-height:1.65;white-space:pre-wrap">$ -m netverify.cli verify --command srl_interface_brief --interface ethernet-1/1 --file C:\work\hardened-mcp-evals\demo\inputs\interface-up.txt</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">ok    interface ethernet-1/1 is admin-enabled and oper-up  [pass]</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap"></div></div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px;flex:1;min-width:340px"><div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><div style="font-size:13px;font-weight:600;color:#e6edf3;margin-bottom:6px">A disabled interface is a fault, with the reason named.</div><div style="font-family:ui-monospace,monospace;font-size:11px;color:#f85149;white-space:nowrap">[exit 1]</div></div><div style="background:#0d1117;border-radius:6px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace"><div style="color:#8b949e;font-size:12.5px;line-height:1.65;white-space:pre-wrap">$ -m netverify.cli verify --command srl_interface_brief --interface ethernet-1/1 --file C:\work\hardened-mcp-evals\demo\inputs\interface-down.txt</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">FAIL  interface ethernet-1/1 is admin-enabled and oper-up  [fail]</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">        interface ethernet-1/1 is not admin-enabled and up</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap"></div></div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px;flex:1;min-width:340px"><div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><div style="font-size:13px;font-weight:600;color:#e6edf3;margin-bottom:6px">Total ping loss is a fault, not an unreadable capture.</div><div style="font-family:ui-monospace,monospace;font-size:11px;color:#f85149;white-space:nowrap">[exit 1]</div></div><div style="background:#0d1117;border-radius:6px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace"><div style="color:#8b949e;font-size:12.5px;line-height:1.65;white-space:pre-wrap">$ -m netverify.cli verify --command ping --file C:\work\hardened-mcp-evals\demo\inputs\ping-total-loss.txt</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">FAIL  ping reached the far end with no total loss  [fail]</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">        no successful reply was recorded; total or partial loss</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap"></div></div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px;flex:1;min-width:340px"><div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><div style="font-size:13px;font-weight:600;color:#e6edf3;margin-bottom:6px">Credential-shaped text is masked and the finding is named.</div><div style="font-family:ui-monospace,monospace;font-size:11px;color:#3fb950;white-space:nowrap">[exit 0]</div></div><div style="background:#0d1117;border-radius:6px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace"><div style="color:#8b949e;font-size:12.5px;line-height:1.65;white-space:pre-wrap">$ -m netverify.cli verify --command ping --scan --file C:\work\hardened-mcp-evals\demo\inputs\hostile-secret.txt</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">ok    ping reached the far end with no total loss  [pass]</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap"></div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">untrusted content found in the supplied output:</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  high     credential - a credential assignment was present and has been masked</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap"></div></div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px;flex:1;min-width:340px"><div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><div style="font-size:13px;font-weight:600;color:#e6edf3;margin-bottom:6px">The installation reports on itself before answering for a network.</div><div style="font-family:ui-monospace,monospace;font-size:11px;color:#3fb950;white-space:nowrap">[exit 0]</div></div><div style="background:#0d1117;border-radius:6px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace"><div style="color:#8b949e;font-size:12.5px;line-height:1.65;white-space:pre-wrap">$ -m netverify.cli self-check</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">netverify 1.2.0  (MCP 2026-07-28)</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  commands            6</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  secret patterns     5</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  injection patterns  9</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  max output          65536 bytes</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  vendored parser     71d3398 (8796 bytes)</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  tracing             off</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  guards:</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">    ok   known_secret_masked</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">    ok   mutating_command_refused</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">    ok   raw_cli_string_refused</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap"></div></div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px;flex:1;min-width:340px"><div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><div style="font-size:13px;font-weight:600;color:#e6edf3;margin-bottom:6px">The MCP surface a host would use: tools, resources, refusal, prompt.</div><div style="font-family:ui-monospace,monospace;font-size:11px;color:#3fb950;white-space:nowrap">[exit 0]</div></div><div style="background:#0d1117;border-radius:6px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace"><div style="color:#8b949e;font-size:12.5px;line-height:1.65;white-space:pre-wrap">$ scripts/smoke_test.py</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">SMOKE TEST OK</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  7 tools, all read-only with output schemas</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  4 resources, contract on protocol 2026-07-28</div><div style="color:#e6edf3;font-size:12.5px;line-height:1.65;white-space:pre-wrap">  valid call verified, out-of-scope refused, injection neutralised</div></div></div></div>
+<!-- ============ CONSOLE ============ -->
+<section id="console" class="border-t border-hairline">
+  <div class="max-w-[1280px] mx-auto px-6 lg:px-12 py-16">
+    <div class="flex items-baseline justify-between flex-wrap gap-4 mb-10">
+      <h2 class="display text-4xl">Console</h2>
+      <p class="text-body text-sm max-w-md">Real <code class="text-mono">tools/call</code> through a real client session on protocol <span id="console-protocol" class="text-ink">—</span>. Refusals are answers too — send a mutating command and watch it come back with a reason code.</p>
+    </div>
+    <div class="grid lg:grid-cols-[280px_1fr] gap-8">
+      <!-- tool list -->
+      <div class="flex lg:flex-col gap-1 overflow-x-auto pb-2 lg:pb-0" id="tool-list"></div>
+      <!-- call area -->
+      <div>
+        <div id="tool-desc" class="text-body text-sm mb-4 min-h-[20px]"></div>
+        <div class="grid md:grid-cols-2 gap-6">
+          <div>
+            <label class="caption-u text-body block mb-2">Arguments <span class="text-mono normal-case">(JSON)</span></label>
+            <textarea id="args" rows="9" spellcheck="false" class="w-full bg-canvas border border-hairline rounded-sm px-4 py-3 font-code text-[13px] text-ink focus:border-rosso focus:outline-none"></textarea>
+          </div>
+          <div>
+            <label class="caption-u text-body block mb-2">Device output <span class="text-mono normal-case">(paste a capture — or load one)</span></label>
+            <textarea id="capture" rows="9" spellcheck="false" class="w-full bg-canvas border border-hairline rounded-sm px-4 py-3 font-code text-[13px] text-ink focus:border-rosso focus:outline-none"></textarea>
+            <div class="flex gap-2 mt-2" id="sample-buttons"></div>
+          </div>
+        </div>
+        <div class="flex items-center gap-6 mt-6">
+          <button id="run" class="btn-u bg-rosso hover:bg-rosso-active text-white h-12 px-8 rounded-none">Run</button>
+          <span id="run-status" class="caption-u text-mono"></span>
+        </div>
+        <div id="result" class="mt-8"></div>
+      </div>
+    </div>
+  </div>
+</section>
 
-<h2 style="font-size:15px;margin:30px 0 12px;color:#e6edf3">Stress demo — the tool under attack <span style="color:#8b949e;font-weight:400;font-size:12px">demo/stress_results.json · exit 0</span></h2>
-<div style="display:flex;flex-wrap:wrap;gap:10px">
-<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;flex:1;min-width:380px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><div style="font-size:13.5px;font-weight:600;color:#e6edf3">Hostile capture: injection + exfiltration + a real secret</div><span style="font-size:11px;color:#3fb950;white-space:nowrap">● PASS</span></div><div style="font-size:12px;color:#8b949e;margin:6px 0 10px;line-height:1.5">verdict stays pass, all three attacks are named, the secret never appears in the verdict or the emitted text</div><div style="margin-bottom:8px"><span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;color:#f85149;background:transparent;border:1px solid #f8514944">instruction_override · critical</span> <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;color:#f85149;background:transparent;border:1px solid #f8514944">exfiltration · critical</span> <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;color:#d29922;background:transparent;border:1px solid #d2992244">credential · high</span></div><div style="font-family:ui-monospace,monospace;font-size:12px;background:#0d1117;border-radius:6px;padding:8px 10px;line-height:1.7"><div><span style="color:#8b949e">pasted&nbsp;&nbsp;</span><span style="color:#f85149">password: Sup3rSecret!</span></div><div><span style="color:#8b949e">emitted&nbsp;</span><span style="color:#3fb950">password: ************</span></div></div><div style="margin-top:8px;font-size:12.5px">outcome <b style="color:#3fb950">pass</b> &nbsp;·&nbsp; secret leaked: <b style="color:#3fb950">no</b></div><div style="margin-top:10px;font-size:11px;color:#8b949e">measured 0.0 ms · demo/stress_demo.py</div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;flex:1;min-width:380px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><div style="font-size:13.5px;font-weight:600;color:#e6edf3">Mutating command id is refused, and the metric label stays bounded</div><span style="font-size:11px;color:#3fb950;white-space:nowrap">● PASS</span></div><div style="font-size:12px;color:#8b949e;margin:6px 0 10px;line-height:1.5">ScopeError with reason=not_in_allowlist; command label is None so a caller cannot mint a metric series per request</div><div style="margin-bottom:8px"><span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;color:#d29922;background:transparent;border:1px solid #d2992244">reason=not_in_allowlist</span> <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;color:#58a6ff;background:transparent;border:1px solid #58a6ff44">metric label: None (bounded)</span></div><div style="font-family:ui-monospace,monospace;font-size:12px;background:#0d1117;border-radius:6px;padding:8px 10px;line-height:1.6;color:#e6edf3">command &#x27;configure terminal&#x27; is not in the allowlist. Allowed ids: [&#x27;frr_bgp_sum…</div><div style="margin-top:8px;font-size:12.5px">raised instead of answered: <b style="color:#3fb950">yes</b></div><div style="margin-top:10px;font-size:11px;color:#8b949e">measured 0.0 ms · demo/stress_demo.py</div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;flex:1;min-width:380px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><div style="font-size:13.5px;font-weight:600;color:#e6edf3">A plausible typo (`intf`) is refused instead of answered from</div><span style="font-size:11px;color:#3fb950;white-space:nowrap">● PASS</span></div><div style="font-size:12px;color:#8b949e;margin:6px 0 10px;line-height:1.5">ScopeError with reason=unknown_argument - a near-miss name must never silently fall back to a default</div><div style="margin-bottom:8px"><span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;color:#d29922;background:transparent;border:1px solid #d2992244">reason=unknown_argument</span></div><div style="font-family:ui-monospace,monospace;font-size:12px;background:#0d1117;border-radius:6px;padding:8px 10px;line-height:1.6;color:#e6edf3">command &#x27;srl_interface_brief&#x27; does not accept argument(s) [&#x27;intf&#x27;]. Accepted: [&#x27;…</div><div style="margin-top:8px;font-size:12.5px">raised instead of answered: <b style="color:#3fb950">yes</b></div><div style="margin-top:10px;font-size:11px;color:#8b949e">measured 0.0 ms · demo/stress_demo.py</div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;flex:1;min-width:380px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><div style="font-size:13.5px;font-weight:600;color:#e6edf3">Token bucket drains exactly, refuses, then recovers</div><span style="font-size:11px;color:#3fb950;white-space:nowrap">● PASS</span></div><div style="font-size:12px;color:#8b949e;margin:6px 0 10px;line-height:1.5">4 of 5 spends allowed, the 5th refused with reason=rate_limited, and spend succeeds again after refill</div><div style="margin-bottom:8px"><span style="display:inline-block;width:26px;height:26px;border-radius:6px;background:#3fb95033;border:1px solid #3fb950;color:#3fb950;text-align:center;line-height:26px;font-size:12px;font-weight:700;margin-right:5px">✓</span><span style="display:inline-block;width:26px;height:26px;border-radius:6px;background:#3fb95033;border:1px solid #3fb950;color:#3fb950;text-align:center;line-height:26px;font-size:12px;font-weight:700;margin-right:5px">✓</span><span style="display:inline-block;width:26px;height:26px;border-radius:6px;background:#3fb95033;border:1px solid #3fb950;color:#3fb950;text-align:center;line-height:26px;font-size:12px;font-weight:700;margin-right:5px">✓</span><span style="display:inline-block;width:26px;height:26px;border-radius:6px;background:#3fb95033;border:1px solid #3fb950;color:#3fb950;text-align:center;line-height:26px;font-size:12px;font-weight:700;margin-right:5px">✓</span><span style="display:inline-block;width:26px;height:26px;border-radius:6px;background:#f8514933;border:1px solid #f85149;color:#f85149;text-align:center;line-height:26px;font-size:12px;font-weight:700;margin-right:5px">✗</span></div><div style="font-size:12.5px;color:#e6edf3;line-height:1.7">5th spend refused with <code style="color:#d29922">reason=rate_limited</code><br>recovered after refill: <b style="color:#3fb950">yes</b></div><div style="margin-top:10px;font-size:11px;color:#8b949e">measured 1109.0 ms · demo/stress_demo.py</div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;flex:1;min-width:380px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><div style="font-size:13.5px;font-weight:600;color:#e6edf3">Oversize capture is truncated at the byte budget, secret dropped</div><span style="font-size:11px;color:#3fb950;white-space:nowrap">● PASS</span></div><div style="font-size:12px;color:#8b949e;margin:6px 0 10px;line-height:1.5">truncated=True, emitted text within max_bytes, and the secret at the tail does not survive the cut</div><div style="font-size:12px;color:#8b949e;margin-bottom:6px">13,023 B in → budget 4,096 B → 4,096 B out</div><div style="height:14px;border-radius:7px;background:#0d1117;border:1px solid #30363d;overflow:hidden;margin-bottom:8px"><div style="width:31%;height:100%;background:#58a6ff55;border-right:2px solid #58a6ff"></div></div><div style="font-size:12.5px">truncated: <b style="color:#3fb950">yes</b> &nbsp;·&nbsp; tail secret in emitted text: <b style="color:#3fb950">no</b></div><div style="margin-top:10px;font-size:11px;color:#8b949e">measured 16.0 ms · demo/stress_demo.py</div></div><div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;flex:1;min-width:380px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><div style="font-size:13.5px;font-weight:600;color:#e6edf3">&#x27;No entries found&#x27; vs &#x27;no route row at all&#x27; are different verdicts</div><span style="font-size:11px;color:#3fb950;white-space:nowrap">● PASS</span></div><div style="font-size:12px;color:#8b949e;margin:6px 0 10px;line-height:1.5">the device answering NO is a real fault (fail); text with no route table is an unusable capture (input_error) - conflating them either hides a fault or pages someone about a bad paste</div><div style="display:flex;gap:10px"><div style="flex:1;background:#0d1117;border:1px solid #f8514966;border-radius:6px;padding:10px"><div style="font-size:11px;color:#8b949e;margin-bottom:4px">"No entries found for prefix"</div><div style="font-family:ui-monospace,monospace;font-size:14px;font-weight:700;color:#f85149">fail</div><div style="font-size:11px;color:#8b949e;margin-top:4px">the device answered NO — a real fault</div></div><div style="flex:1;background:#0d1117;border:1px solid #d2992266;border-radius:6px;padding:10px"><div style="font-size:11px;color:#8b949e;margin-bottom:4px">no route row in the text at all</div><div style="font-family:ui-monospace,monospace;font-size:14px;font-weight:700;color:#d29922">input_error</div><div style="font-size:11px;color:#8b949e;margin-top:4px">an unusable capture — not a fault</div></div></div><div style="margin-top:10px;font-size:11px;color:#8b949e">measured 0.0 ms · demo/stress_demo.py</div></div>
-</div>
+<!-- ============ WIRE PROOF ============ -->
+<section id="proof" class="border-t border-hairline bg-elevated/40">
+  <div class="max-w-[1280px] mx-auto px-6 lg:px-12 py-16">
+    <div class="flex items-baseline justify-between flex-wrap gap-4 mb-10">
+      <h2 class="display text-4xl">Wire proof</h2>
+      <p class="text-body text-sm max-w-md">Spawns <code class="text-mono">python -m server</code> as a real process, pipes newline-delimited JSON-RPC to its stdin, and shows every frame that came back. Stdout is the protocol channel — silence here would be a hang, not an error.</p>
+    </div>
+    <button id="proof-run" class="btn-u border border-ink text-ink h-12 px-8 rounded-none hover:border-rosso hover:text-rosso">Run over stdio</button>
+    <div id="proof-out" class="mt-8"></div>
+  </div>
+</section>
 
-<div style="margin-top:28px;padding:14px 16px;background:#161b22;border:1px solid #30363d;border-radius:8px;font-size:12.5px;color:#8b949e;line-height:1.7">
-<b style="color:#e6edf3">Reproduce:</b>
-<code style="color:#58a6ff">python demo/wrap_up_demo.py</code> ·
-<code style="color:#58a6ff">python demo/stress_demo.py</code> ·
-<code style="color:#58a6ff">python demo/build_dashboard.py</code> — all read-only, offline, zero dependencies beyond the optional PNG render.
-</div>
+<!-- ============ TELEMETRY ============ -->
+<section id="telemetry" class="border-t border-hairline">
+  <div class="max-w-[1280px] mx-auto px-6 lg:px-12 py-16">
+    <div class="flex items-baseline justify-between flex-wrap gap-4 mb-10">
+      <h2 class="display text-4xl">Telemetry</h2>
+      <p class="text-body text-sm max-w-md">OpenTelemetry SDK providers installed before the server imported: the SDK's SERVER spans, netverify's own span, and the five instruments. What the calls recorded, not what the code claims.</p>
+    </div>
+    <div id="tel-status" class="flex flex-wrap gap-2 mb-10"></div>
+    <div class="grid lg:grid-cols-2 gap-10">
+      <div>
+        <h3 class="caption-u text-body mb-4">Metrics <span class="text-mono normal-case">· instruments</span></h3>
+        <div id="tel-metrics" class="border-t border-hairline"></div>
+      </div>
+      <div>
+        <h3 class="caption-u text-body mb-4">Spans <span class="text-mono normal-case">· newest first</span></h3>
+        <div id="tel-spans" class="border-t border-hairline font-code text-xs"></div>
+      </div>
+    </div>
+  </div>
+</section>
 
-</div>
+<!-- ============ FOOTER ============ -->
+<footer class="border-t border-hairline mt-8">
+  <div class="max-w-[1280px] mx-auto px-6 lg:px-12 py-16 grid md:grid-cols-3 gap-8 text-[13px] text-body">
+    <div>
+      <div class="caption-u text-ink mb-4">Reproduce</div>
+      <div class="font-code space-y-1"><div>python demo/wrap_up_demo.py</div><div>python demo/stress_demo.py</div><div>python demo/live_server.py</div></div>
+    </div>
+    <div>
+      <div class="caption-u text-ink mb-4">Trust boundary</div>
+      <p>Read-only over stdio; holds no credentials; opens no sockets. Device output is treated as hostile throughout — masked, never emitted, counted by kind.</p>
+    </div>
+    <div>
+      <div class="caption-u text-ink mb-4">Gates</div>
+      <p>370 tests · 46/46 evals · mutation 21/21 · parity · zero-dependency. A test never seen red is not known to detect anything.</p>
+    </div>
+  </div>
+</footer>
+
+<script>
+// ---------- helpers ----------
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pill = (text, cls) => `<span class="rounded-full px-3 py-1 caption-u ${cls}">${esc(text)}</span>`;
+const OUTCOME_CLS = { pass: "text-success border-success/40", fail: "text-warn border-warn/40", input_error: "text-info border-info/40" };
+const SEV_CLS = { critical: "text-warn border-warn/40", high: "text-rosso border-rosso/40", medium: "text-info border-info/40" };
+
+// ---------- bootstrap ----------
+let BOOT = null, CURRENT_TOOL = null, VERDICTS = 0;
+
+async function loadBootstrap() {
+  try {
+    const r = await fetch("/api/bootstrap");
+    BOOT = await r.json();
+    if (BOOT.error) throw new Error(BOOT.error);
+    $("nav-protocol").textContent = "MCP " + BOOT.protocol_version;
+    $("console-protocol").textContent = BOOT.protocol_version;
+    $("spec-tools").textContent = BOOT.tools.length;
+    $("spec-resources").textContent = BOOT.resources.length + BOOT.templates.length;
+    $("spec-spans").textContent = BOOT.telemetry.spans_recorded;
+    setLive(true, "Live");
+    renderTools();
+    renderSamples();
+    renderTelStatus(BOOT.telemetry);
+  } catch (e) {
+    setLive(false, "Offline");
+    $("console-protocol").textContent = "server unreachable";
+  }
+}
+function setLive(ok, label) {
+  $("live-dot").className = `w-2 h-2 rounded-full inline-block ${ok ? "bg-success" : "bg-warn"}`;
+  $("live-label").textContent = label;
+}
+
+// ---------- console ----------
+function renderTools() {
+  $("tool-list").innerHTML = BOOT.tools.map(t =>
+    `<button data-name="${esc(t.name)}" class="tool-btn text-left font-code text-[13px] px-4 py-3 border-l-2 border-hairline text-body hover:text-ink whitespace-nowrap lg:whitespace-normal">${esc(t.name)}</button>`
+  ).join("");
+  document.querySelectorAll(".tool-btn").forEach(b => b.onclick = () => pickTool(b.dataset.name));
+  pickTool("verify_network_output");
+}
+function pickTool(name) {
+  CURRENT_TOOL = name;
+  const t = BOOT.tools.find(x => x.name === name);
+  document.querySelectorAll(".tool-btn").forEach(b => {
+    const active = b.dataset.name === name;
+    b.className = `tool-btn text-left font-code text-[13px] px-4 py-3 border-l-2 whitespace-nowrap lg:whitespace-normal ${active ? "border-rosso text-ink" : "border-hairline text-body hover:text-ink"}`;
+  });
+  $("tool-desc").textContent = t ? (t.description || "") : "";
+  $("args").value = sampleArgs(name);
+  $("result").innerHTML = "";
+  $("run-status").textContent = "";
+}
+// The placeholder is what the sample loaders fill. It is typed into `output`
+// fields only, so a capture lands where the tool reads it and never in a
+// field like `interface` that means something else.
+const PLACEHOLDER = "«paste or load a capture»";
+// Real, runnable defaults for every tool in the catalogue. These are shaped
+// against each tool's own input_schema - `verify_capture` takes an object with
+// a `commands` list, not a bare list, and `compare_captures` takes `before`
+// and `after`, so an empty-string default here would only ever produce a
+// refusal that says nothing about the tool.
+function sampleArgs(name) {
+  const s = BOOT.samples;
+  const up = (s["interface-up"] || "").trim();
+  const down = (s["interface-down"] || "").trim();
+  const loss = s["ping-total-loss"] || "";
+  const batch = [
+    { command: "srl_interface_brief", interface: "ethernet-1/1", output: up },
+    { command: "ping", output: loss },
+  ];
+  const shapes = {
+    verify_network_output: { command: "srl_interface_brief", interface: "ethernet-1/1", output: PLACEHOLDER },
+    sanitize_device_output: { output: PLACEHOLDER },
+    audit_device_output: { output: PLACEHOLDER },
+    verify_capture: { commands: batch },
+    synthesize_health: { commands: batch },
+    compare_captures: { before: up, after: down },
+    self_check: {},
+  };
+  return JSON.stringify(shapes[name] !== undefined ? shapes[name] : {}, null, 2);
+}
+function renderSamples() {
+  const names = { "interface-up": "Healthy interface", "interface-down": "Disabled interface", "ping-total-loss": "Ping loss", "hostile-secret": "Hostile + secret" };
+  $("sample-buttons").innerHTML = Object.keys(names).filter(k => BOOT.samples[k]).map(k =>
+    `<button data-s="${esc(k)}" class="caption-u border border-hairline text-body hover:text-ink px-3 py-1.5 rounded-none">${names[k]}</button>`
+  ).join("");
+  document.querySelectorAll("#sample-buttons button").forEach(b => b.onclick = () => {
+    $("capture").value = BOOT.samples[b.dataset.s];
+    // Splice the loaded capture into every `output` the arguments declare, so
+    // what the textarea shows is what RUN will actually send.
+    try {
+      const a = splice(JSON.parse($("args").value), BOOT.samples[b.dataset.s]);
+      $("args").value = JSON.stringify(a, null, 2);
+    } catch {}
+  });
+}
+// Fill every declared `output` that still holds the placeholder - or is empty -
+// with the capture text. Nothing else is touched: `interface`, `command` and
+// the pre-filled `before`/`after` of `compare_captures` keep their meaning.
+function splice(node, cap, key) {
+  if (typeof node === "string") {
+    return (key === "output" && (node === "" || node === PLACEHOLDER)) ? cap : node;
+  }
+  if (Array.isArray(node)) return node.map(v => splice(v, cap, key));
+  if (node && typeof node === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(node)) out[k] = splice(v, cap, k);
+    return out;
+  }
+  return node;
+}
+function injectCapture() {
+  const cap = $("capture").value;
+  const args = splice(JSON.parse($("args").value), cap);
+  $("args").value = JSON.stringify(args, null, 2); // show exactly what goes out
+  return args;
+}
+$("run").onclick = async () => {
+  if (!CURRENT_TOOL) return;
+  let args;
+  try { args = injectCapture(); }
+  catch (e) { $("run-status").textContent = "arguments are not valid JSON: " + e.message; return; }
+  $("run").disabled = true;
+  $("run-status").textContent = "calling…";
+  $("result").innerHTML = "";
+  const t0 = performance.now();
+  try {
+    const r = await fetch("/api/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "tool", name: CURRENT_TOOL, arguments: args }) });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    VERDICTS++;
+    $("spec-verdicts").textContent = VERDICTS;
+    renderResult(d);
+    renderCallTelemetry(d);
+  } catch (e) {
+    $("run-status").textContent = "failed: " + e.message;
+  } finally {
+    $("run").disabled = false;
+  }
+};
+function renderResult(d) {
+  const res = d.result || {};
+  const sc = res.structured || {};
+  const outcome = sc.outcome;
+  let head = "";
+  if (outcome) {
+    head = `<div class="flex items-center gap-3 mb-4">
+      <span class="border px-3 py-1 caption-u ${OUTCOME_CLS[outcome] || "text-body border-hairline"}">${esc(outcome)}</span>
+      <span class="caption-u text-mono">${esc(d.elapsed_ms)} ms · ${d.spans.length} span(s)</span>
+    </div>`;
+    if (sc.observed) head += `<div class="text-ink text-sm mb-2">${esc(sc.observed)}</div>`;
+    if (sc.reasons && sc.reasons.length) head += `<ul class="text-body text-sm list-disc pl-5 mb-2">${sc.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>`;
+  } else if (res.is_error) {
+    const reason = (res.text.match(/\[reason=([a-z_]+)\]/) || [])[1];
+    head = `<div class="flex items-center gap-3 mb-4">
+      <span class="border px-3 py-1 caption-u text-warn border-warn/40">refused</span>
+      ${reason ? pill("reason=" + reason, "text-rosso border-rosso/40") : ""}
+      <span class="caption-u text-mono">${esc(d.elapsed_ms)} ms</span>
+    </div>
+    <div class="font-code text-[13px] text-body bg-canvas border border-hairline p-4 rounded-sm whitespace-pre-wrap">${esc(res.text)}</div>`;
+  } else if (res.text) {
+    head = `<div class="font-code text-[13px] text-ink bg-canvas border border-hairline p-4 rounded-sm whitespace-pre-wrap max-h-72 overflow-auto">${esc(res.text)}</div>`;
+  }
+  const findings = (sc.findings || []);
+  if (findings.length) {
+    head += `<div class="flex flex-wrap gap-2 mt-4">${findings.map(f =>
+      typeof f === "object" ? pill(`${f.kind ?? f[0]} · ${f.severity ?? f[1]}`, SEV_CLS[f.severity ?? f[1]] || "text-body border-hairline") : pill(f, "text-body border-hairline")
+    ).join("")}</div>`;
+  }
+  if (d.metric_deltas && d.metric_deltas.length) {
+    head += `<div class="mt-4 flex flex-wrap gap-2">${d.metric_deltas.map(m =>
+      pill(`${m.name} +${m.delta}${Object.keys(m.attributes).length ? " · " + Object.entries(m.attributes).map(([k, v]) => v).join(" ") : ""}`, "text-info border-info/40")
+    ).join("")}</div>`;
+  }
+  $("result").innerHTML = `<div class="border border-hairline p-6 rounded-none bg-elevated/30">${head}</div>`;
+  $("run-status").textContent = "answered in " + d.elapsed_ms + " ms";
+}
+function renderCallTelemetry(d) {
+  if (!d.spans.length) return;
+  const rows = d.spans.map(s =>
+    `<div class="flex justify-between gap-4 py-2 border-b border-hairline/60">
+      <span class="text-ink">${esc(s.name)}</span>
+      <span class="text-mono">${s.duration_ms} ms</span>
+    </div>`
+  ).join("");
+  $("result").innerHTML += `<div class="mt-4"><div class="caption-u text-body mb-2">Spans this call</div>${rows}</div>`;
+}
+
+// ---------- wire proof ----------
+$("proof-run").onclick = async () => {
+  $("proof-run").disabled = true;
+  $("proof-run").textContent = "Speaking to the process…";
+  $("proof-out").innerHTML = "";
+  try {
+    const r = await fetch("/api/stdio-proof", { method: "POST" });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    const frames = d.frames.map(f => {
+      const dir = f.direction === "out"
+        ? `<span class="caption-u text-info shrink-0 w-16">→ out</span>`
+        : `<span class="caption-u ${f.raw ? "text-success" : "text-warn"} shrink-0 w-16">← in</span>`;
+      const body = f.raw ? JSON.stringify(f.raw) : (f.note || "");
+      const payload = f.raw && f.raw.result && f.raw.result.tools ? ` … ${f.raw.result.tools.length} tools` : "";
+      return `<div class="flex gap-4 py-3 border-b border-hairline items-start">
+        ${dir}
+        <span class="font-code text-[11px] text-mono shrink-0 w-40 pt-0.5">#${f.id} ${esc(f.method)}${payload}</span>
+        <span class="font-code text-[12px] ${f.raw ? "text-body" : "text-warn"} break-all flex-1">${esc(body).slice(0, 400)}${body.length > 400 ? " …" : ""}</span>
+        <span class="font-code text-[11px] text-mono shrink-0 pt-0.5">${f.direction === "in" ? f.t_ms + " ms" : ""}</span>
+      </div>`;
+    }).join("");
+    const checks = d.assertions.map(a =>
+      `<div class="flex items-center gap-3 py-1.5">
+        <span class="${a.ok ? "text-success" : "text-warn"} font-bold">${a.ok ? "✓" : "✗"}</span>
+        <span class="text-sm text-ink">${esc(a.step)}</span>
+        <span class="text-sm text-body">${esc(a.detail)}</span>
+      </div>`
+    ).join("");
+    $("proof-out").innerHTML = `
+      <div class="border border-hairline bg-canvas p-6 rounded-none mb-6">${frames || "<span class='text-body text-sm'>no frames</span>"}</div>
+      <div class="border border-hairline bg-canvas p-6 rounded-none">
+        <div class="caption-u text-body mb-3">Assertions</div>
+        ${checks}
+        <div class="mt-4">${d.all_answered
+          ? pill("SERVER ANSWERED EVERY FRAME · " + d.protocol_version, "text-success border-success/40")
+          : pill("SILENCE ON THE WIRE — SEE ABOVE", "text-warn border-warn/40")}</div>
+      </div>`;
+  } catch (e) {
+    $("proof-out").innerHTML = `<div class="text-warn text-sm">proof failed: ${esc(e.message)}</div>`;
+  } finally {
+    $("proof-run").disabled = false;
+    $("proof-run").textContent = "Run over stdio";
+  }
+};
+
+// ---------- telemetry ----------
+function renderTelStatus(s) {
+  const items = [
+    ["Tracer", s.tracer], ["Meter", s.meter], ["Metrics state", s.metrics_state],
+    ["Host provider", s.host_provider], ["Spans collected", s.spans_recorded],
+    ["SDK SERVER spans", s.sdk_emits_server_spans ? "yes" : "no"],
+  ];
+  $("tel-status").innerHTML = items.map(([k, v]) =>
+    `<span class="inline-flex items-center gap-2 bg-elevated rounded-full px-3 py-1.5">
+      <span class="caption-u text-body">${esc(k)}</span><span class="caption-u text-ink">${esc(v)}</span>
+    </span>`
+  ).join("");
+}
+async function refreshTelemetry() {
+  try {
+    const r = await fetch("/api/telemetry");
+    const d = await r.json();
+    $("spec-spans").textContent = d.total_spans;
+    renderTelStatus(d.status);
+    const groups = {};
+    for (const m of d.metrics) {
+      const key = m.name + (m.is_histogram ? " (hist)" : "");
+      groups[key] = groups[key] || {};
+      const label = Object.entries(m.attributes).map(([k, v]) => v).join(" ") || "total";
+      groups[key][label] = m.is_histogram ? `${m.value} calls · mean ${m.mean_ms} ms` : m.value;
+    }
+    $("tel-metrics").innerHTML = Object.entries(groups).map(([name, vals]) =>
+      `<div class="py-3 border-b border-hairline">
+        <div class="font-code text-[13px] text-ink mb-1">${esc(name)}</div>
+        ${Object.entries(vals).map(([k, v]) =>
+          `<div class="flex justify-between text-[13px]"><span class="text-body">${esc(k)}</span><span class="font-code text-ink">${esc(v)}</span></div>`).join("")}
+      </div>`
+    ).join("") || `<div class="text-body text-sm py-3">no metrics yet — run a call</div>`;
+    const spans = d.spans.slice().reverse().slice(0, 24);
+    $("tel-spans").innerHTML = spans.map(s => {
+      const key = Object.entries(s.attributes).filter(([k]) => k.includes("gen_ai") || k.includes("netverify")).slice(0, 2)
+        .map(([, v]) => v).join(" · ");
+      return `<div class="flex justify-between gap-3 py-2 border-b border-hairline/60">
+        <span class="text-ink">${esc(s.name)}${key ? `<span class="text-mono text-mono"> — ${esc(key)}</span>` : ""}</span>
+        <span class="text-mono shrink-0">${s.duration_ms} ms</span>
+      </div>`;
+    }).join("") || `<div class="text-body text-sm py-3">no spans yet</div>`;
+  } catch {}
+}
+setInterval(refreshTelemetry, 3000);
+loadBootstrap().then(refreshTelemetry);
+</script>
 </body>
 </html>
