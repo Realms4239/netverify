@@ -1,0 +1,24 @@
+# Gitleaks runs with the default rule set extended by the allowlist below.
+#
+# This repository's product is a sanitizer whose test corpus *is* fake
+# credentials: an AWS example key straight from AWS's own documentation, a
+# classic example password, and the detection patterns themselves. Those are
+# findings the tool is supposed to catch, sitting in files whose job is to be
+# caught - an allowlist entry per file, with the reason inline, keeps the
+# scanner honest about real secrets everywhere else.
+
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Deliberate fixtures: fake secrets the sanitizer is tested against"
+
+  # AWS's documented example key, used verbatim as hostile input.
+  regexes = ['''AKIAIOSFODNN7EXAMPLE''']
+
+  paths = [
+    '''demo/inputs/hostile-secret\.txt''',
+    '''tests/fixtures\.py''',
+    '''tests/test_hostile_inputs\.py''',
+    '''evals/cases/03-sanitize-and-batch\.json''',
+  ]
