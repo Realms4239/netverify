@@ -218,7 +218,21 @@ def _charge(cost: float = 1.0, *, tool: str | None = None) -> None:
         raise ToolError(str(exc)) from exc
 
 
-def _refuse(exc: ScopeError, *, tool: str | None = None) -> ToolError:
+def _refusal_text(exc: BaseException) -> str:
+    """A refusal message that carries its stable reason code.
+
+    `ScopeError.reason` is the vocabulary a client is meant to branch on, and
+    `str(exc)` is prose for a human. Only the prose was reaching the wire, so a
+    client had to parse a sentence to decide whether to correct an argument,
+    wait out a budget, or give up - and this project's whole position is that
+    prose is not where meaning belongs. The code is appended, not substituted:
+    the sentence stays, because a model reads it and an operator reads it.
+    """
+    reason = getattr(exc, "reason", None) or REASON_BAD_ARGUMENT
+    return f"{exc} [reason={reason}]"
+
+
+def _refuse(exc: ScopeError, *, attempted: str | None = None) -> ToolError:
     """Translate a library refusal into a tool error, and count it by reason.
 
     Every refusal path funnels through here so the `netverify.refused` counter
@@ -227,19 +241,33 @@ def _refuse(exc: ScopeError, *, tool: str | None = None) -> ToolError:
     counter) is recorded as `bad_argument` rather than dropped - an uncounted
     refusal is a blind spot, and the generic bucket is honest about that.
 
-    The `command` label is the exception's, not the adapter's. An earlier
-    version passed the *tool* name through the same attribute, which read as a
-    command id on a dashboard - two vocabularies in one column, and
-    `netverify.refusal.command=verify_capture` next to
-    `netverify.command.id=srl_interface_brief` is how a panel starts lying.
-    `tool` is still accepted for the audit line, which is prose and can say
-    both.
+    Two labels, deliberately different:
+
+    - the **metric** label is `exc.command`, which the library leaves `None` for
+      `not_in_allowlist` because there the id is whatever the caller invented and
+      a caller that mints a fresh name per request would mint a new metric series
+      per request. Passing the caller's raw string here is the bug this function
+      exists to prevent - see the `command` attribute's own docstring in
+      `netverify/errors.py`.
+    - the **audit** line is prose for an operator, where "someone tried
+      `configure terminal`" is the entire point and unbounded cardinality costs
+      nothing. `attempted` is what the caller sent, and it is recorded whether or
+      not the id was valid.
+
+    An earlier version of this helper took a `tool` argument and passed it
+    through `command`, which read as a command id on a dashboard - two
+    vocabularies in one column, and `netverify.refusal.command=verify_capture`
+    next to `netverify.command.id=srl_interface_brief` is how a panel starts
+    lying. It also called `AUDIT.record(..., tool=...)`, which `AuditLog.record`
+    does not accept, so it would have raised `TypeError` on its first call. That
+    is *why* it was never called: this function was dead code, and the tool below
+    re-implemented the translation inline - with the caller's raw id in the
+    metric label, which is exactly the unbounded series this docstring forbids.
     """
-    command = getattr(exc, "command", None)
-    message = str(exc)
-    AUDIT.record("refused", tool=tool, detail=message)
-    record_refused(exc.reason or REASON_BAD_ARGUMENT, command=command)
-    return ToolError(message)
+    bounded = getattr(exc, "command", None)
+    AUDIT.record("refused", command_id=attempted or bounded, detail=str(exc))
+    record_refused(getattr(exc, "reason", None) or REASON_BAD_ARGUMENT, command=bounded)
+    return ToolError(_refusal_text(exc))
 
 
 def verify_network_output(
@@ -301,16 +329,7 @@ def verify_network_output(
         # Letting a bare ValueError escape would surface as a crash with a
         # generic message and the reason lost, which is precisely the case where
         # the model most needs to be told what to fix.
-        AUDIT.record(
-            "refused",
-            command_id=command if isinstance(command, str) else None,
-            detail=str(exc),
-        )
-        record_refused(
-            exc.reason or REASON_BAD_ARGUMENT,
-            command=command if isinstance(command, str) else "verify_network_output",
-        )
-        raise ToolError(str(exc)) from exc
+        raise _refuse(exc, attempted=command if isinstance(command, str) else None) from exc
     record_duration("verify_network_output", time.perf_counter() - started)
     return verdict.to_dict()
 
@@ -526,7 +545,7 @@ def verify_capture(
     for item in raw:
         if isinstance(item, Exception):
             refused_count += 1
-            results.append({"refused": str(item)})
+            results.append({"refused": _refusal_text(item)})
             # Counted per entry, not per batch: a batch that refused 190 of 200
             # entries is a different operational signal from one that refused
             # one, and a per-call counter would flatten the difference. Reason

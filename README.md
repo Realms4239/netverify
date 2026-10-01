@@ -272,6 +272,15 @@ carries no command, because there the id is whatever the caller invented and
 labelling it would let one caller mint a metric series per request.
 `tests/test_refusal_reasons.py` pins one case per raise site.
 
+The code rides on the wire as well as into the metric: a refused tool call comes
+back carrying `[reason=...]` alongside the prose, so a client can branch on the
+code instead of parsing a sentence to decide whether to correct an argument, wait
+out a budget, or give up. The two labels are deliberately different — the audit
+line keeps *what the caller attempted*, which is unbounded by nature and is the
+whole point of a forensic log, while the metric label is the bounded
+`ScopeError.command`, which is `None` for `not_in_allowlist` precisely because
+there the id is whatever the caller invented.
+
 The tool signature is deliberately explicit rather than `**kwargs`, because the
 SDK derives the input schema from it and a catch-all becomes a required
 `kwargs` property. The trade-off is documented in `server/app.py`.

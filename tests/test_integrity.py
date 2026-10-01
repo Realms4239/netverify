@@ -389,9 +389,20 @@ class TestNoTestIsSilentlyDisabled(unittest.TestCase):
 
         return {name for name in bases if is_case(name)}
 
-    def _uncollectable(self, path):
-        """Every `def test_*` in `path` no runner can reach, with the reason."""
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    def _uncollectable(self, source):
+        """Every `def test_*` in `source` no runner can reach, with the reason.
+
+        Takes text, not a path, so the negative control below can be checked
+        without being written to disk. It used to be written into `tests/`,
+        which put it inside two things that read that directory: discovery
+        collected its `test_a_real_one` as a real test (the count rose to 371),
+        and this sweep globbed it as a real file. `addCleanup` deleted it -- so
+        the bug only appeared when a run was interrupted and the file survived.
+        Then every later run failed here, accusing the suite of a defect that
+        the guard's own control had introduced. A control that must be cleaned
+        up cannot be relied on to be.
+        """
+        tree = ast.parse(source)
         cases = self._testcase_names(tree)
         found = []
         for node, parents in self._parents(tree):
@@ -414,7 +425,7 @@ class TestNoTestIsSilentlyDisabled(unittest.TestCase):
         """The sweep, reported per file so a failure names the file."""
         dead = {}
         for path in self.files:
-            found = self._uncollectable(path)
+            found = self._uncollectable(path.read_text(encoding="utf-8"))
             if found:
                 dead[path.name] = [
                     f"{node.name} (line {node.lineno}): {why}" for node, why in found
@@ -429,8 +440,7 @@ class TestNoTestIsSilentlyDisabled(unittest.TestCase):
         shape that was there - a test indented under `unittest.main()` - and
         require the sweep to catch it.
         """
-        broken = ROOT / "tests" / "test_unreachable_control.py"
-        broken.write_text(
+        broken = (
             "import unittest\n"
             "\n"
             "class Real(unittest.TestCase):\n"
@@ -441,10 +451,8 @@ class TestNoTestIsSilentlyDisabled(unittest.TestCase):
             "    unittest.main()\n"
             "\n"
             "    def test_never_called(self):\n"
-            "        pass\n",
-            encoding="utf-8",
+            "        pass\n"
         )
-        self.addCleanup(broken.unlink)
 
         found = self._uncollectable(broken)
 

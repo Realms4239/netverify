@@ -1,0 +1,95 @@
+{
+  "commit": "603fc60",
+  "version": "1.2.0",
+  "all_pass": true,
+  "scenarios": [
+    {
+      "id": "hostile_capture",
+      "title": "Hostile capture: injection + exfiltration + a real secret",
+      "expectation": "verdict stays pass, all three attacks are named, the secret never appears in the verdict or the emitted text",
+      "observed": {
+        "outcome": "pass",
+        "findings": [
+          {
+            "kind": "instruction_override",
+            "severity": "critical"
+          },
+          {
+            "kind": "exfiltration",
+            "severity": "critical"
+          },
+          {
+            "kind": "credential",
+            "severity": "high"
+          }
+        ],
+        "masked_password_line": "password: ************",
+        "secret_leaked": false
+      },
+      "pass": true,
+      "duration_ms": 0.0
+    },
+    {
+      "id": "refusal_allowlist",
+      "title": "Mutating command id is refused, and the metric label stays bounded",
+      "expectation": "ScopeError with reason=not_in_allowlist; command label is None so a caller cannot mint a metric series per request",
+      "observed": {
+        "raised": true,
+        "reason": "not_in_allowlist",
+        "metric_command_label": null,
+        "message": "command 'configure terminal' is not in the allowlist. Allowed ids: ['frr_bgp_sum"
+      },
+      "pass": true,
+      "duration_ms": 0.0
+    },
+    {
+      "id": "refusal_unknown_argument",
+      "title": "A plausible typo (`intf`) is refused instead of answered from",
+      "expectation": "ScopeError with reason=unknown_argument - a near-miss name must never silently fall back to a default",
+      "observed": {
+        "raised": true,
+        "reason": "unknown_argument",
+        "message": "command 'srl_interface_brief' does not accept argument(s) ['intf']. Accepted: ['"
+      },
+      "pass": true,
+      "duration_ms": 0.0
+    },
+    {
+      "id": "rate_limit_burst",
+      "title": "Token bucket drains exactly, refuses, then recovers",
+      "expectation": "4 of 5 spends allowed, the 5th refused with reason=rate_limited, and spend succeeds again after refill",
+      "observed": {
+        "allowed_before_refusal": 4,
+        "refusal_reason": "rate_limited",
+        "recovered_after_refill": true
+      },
+      "pass": true,
+      "duration_ms": 1109.0
+    },
+    {
+      "id": "oversize_truncation",
+      "title": "Oversize capture is truncated at the byte budget, secret dropped",
+      "expectation": "truncated=True, emitted text within max_bytes, and the secret at the tail does not survive the cut",
+      "observed": {
+        "input_bytes": 13023,
+        "max_bytes": 4096,
+        "emitted_bytes": 4096,
+        "truncated": true,
+        "secret_leaked": false
+      },
+      "pass": true,
+      "duration_ms": 16.0
+    },
+    {
+      "id": "empty_table_semantics",
+      "title": "'No entries found' vs 'no route row at all' are different verdicts",
+      "expectation": "the device answering NO is a real fault (fail); text with no route table is an unusable capture (input_error) - conflating them either hides a fault or pages someone about a bad paste",
+      "observed": {
+        "no_entries_outcome": "fail",
+        "no_row_outcome": "input_error"
+      },
+      "pass": true,
+      "duration_ms": 0.0
+    }
+  ]
+}

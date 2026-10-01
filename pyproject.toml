@@ -87,6 +87,13 @@ ignore = [
 # seed is exactly what makes a fuzz failure reproducible rather than a flake
 # that gets re-run until it passes. No secret is derived from it.
 "tests/test_properties.py" = ["S311"]
+# The stress demo fabricates a decoy secret for the sanitizer to catch and
+# truncate - the same reason tests/fixtures.py carries S105. It is a
+# deliberately fake credential, not a leaked one.
+"demo/stress_demo.py" = ["S105"]
+# The demo dashboard generator emits inline-styled HTML from f-strings; markup
+# lines are long by nature, and breaking them hides the structure being built.
+"demo/build_dashboard.py" = ["E501"]
 # Same reasoning for the fake clock in the rate-limiter tests.
 "tests/test_limits_audit.py" = ["S311"]
 # models.py has an enum member literally named PASS. S105 reads the identifier as

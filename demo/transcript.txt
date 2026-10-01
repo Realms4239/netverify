@@ -1,0 +1,51 @@
+netverify wrap-up demonstration
+commit: 603fc60
+Every command below is read-only and offline.
+
+$ -m netverify.cli verify --command srl_interface_brief --interface ethernet-1/1 --file C:\work\hardened-mcp-evals\demo\inputs\interface-up.txt
+# A healthy interface is reported healthy.
+ok    interface ethernet-1/1 is admin-enabled and oper-up  [pass]
+[exit 0]
+
+$ -m netverify.cli verify --command srl_interface_brief --interface ethernet-1/1 --file C:\work\hardened-mcp-evals\demo\inputs\interface-down.txt
+# A disabled interface is a fault, with the reason named.
+FAIL  interface ethernet-1/1 is admin-enabled and oper-up  [fail]
+        interface ethernet-1/1 is not admin-enabled and up
+[exit 1]
+
+$ -m netverify.cli verify --command ping --file C:\work\hardened-mcp-evals\demo\inputs\ping-total-loss.txt
+# Total ping loss is a fault, not an unreadable capture.
+FAIL  ping reached the far end with no total loss  [fail]
+        no successful reply was recorded; total or partial loss
+[exit 1]
+
+$ -m netverify.cli verify --command ping --scan --file C:\work\hardened-mcp-evals\demo\inputs\hostile-secret.txt
+# Credential-shaped text is masked and the finding is named.
+ok    ping reached the far end with no total loss  [pass]
+
+untrusted content found in the supplied output:
+  high     credential - a credential assignment was present and has been masked
+[exit 0]
+
+$ -m netverify.cli self-check
+# The installation reports on itself before answering for a network.
+netverify 1.2.0  (MCP 2026-07-28)
+  commands            6
+  secret patterns     5
+  injection patterns  9
+  max output          65536 bytes
+  vendored parser     71d3398 (8796 bytes)
+  tracing             off
+  guards:
+    ok   known_secret_masked
+    ok   mutating_command_refused
+    ok   raw_cli_string_refused
+[exit 0]
+
+$ scripts/smoke_test.py
+# The MCP surface a host would use: tools, resources, refusal, prompt.
+SMOKE TEST OK
+  7 tools, all read-only with output schemas
+  4 resources, contract on protocol 2026-07-28
+  valid call verified, out-of-scope refused, injection neutralised
+[exit 0]

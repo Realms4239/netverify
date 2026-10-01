@@ -10,10 +10,15 @@ fragment mid-file. All corrected below.
 
 ## Where things are
 
-- Project: `C:\work\hardened-mcp-evals` (branch `main`, clean, **no remote**)
-- Vault: `C:\AIR` (separate repo, clean at `d3dbbb3`)
+- Project: `C:\work\hardened-mcp-evals` (branch `main`, **no remote** — verified,
+  `git remote -v` is empty)
+- Vault: `C:\AIR` (separate repo, at `d3dbbb3` — verified this round)
 - Reference clone: `C:\isp-ref` (upstream `isp-network-as-code`)
 - SEP-2640 text: `C:\work\sep2640.md` · SDK source: `C:\work\mcp2x`
+
+"Clean" is checked, not asserted. At the start of this round the tree was **not**
+clean (`demo/` untracked) and the suite was **not** green (one failure), while
+the handoff claimed both.
 
 `netverify` is a **zero-dependency Python library** plus a thin **read-only MCP
 server** that verifies ISP backbone device output (SR Linux, FRR). It holds no
@@ -25,8 +30,47 @@ Full gate set green at `31939c2`, and re-verified unchanged this round:
 
 ```
 370 tests · 46/46 evals · ruff check · ruff format · bandit -ll ·
-zero-dependency · mutation 20/20 · smoke · parity · stdio · wheel-install
+zero-dependency · mutation 21/21 · smoke · parity · stdio · wheel-install
 ```
+
+### The demonstrability round (this cycle)
+
+The wrap-up demo existed but was not reliably runnable: its PNG step raised
+`ModuleNotFoundError` for Pillow *after* every command had already succeeded —
+a passing demonstration made non-demonstrable by its decoration. The render is
+now optional and says so when skipped; `transcript.txt` is the canonical
+record. Two new artefacts make the claims watchable rather than documented:
+
+- **`demo/stress_demo.py`** — six adversarial scenarios, each with a written
+  expectation and an assertion (exit 1 if reality disagrees): hostile capture
+  (injection + exfiltration + a real secret on a healthy interface — verdict
+  stays `pass`, all three attacks named, the secret never emitted), the
+  allowlist refusal with its bounded metric label, the typo-argument refusal,
+  a token-bucket burst/refuse/recover, oversize truncation dropping the tail
+  secret, and the empty-table vs missing-row classification. Writes
+  `demo/stress_results.json`. Found by running it: `TokenBucket`'s method is
+  `consume`, not `spend`, and a script under `demo/` needs the repo root
+  bootstrapped onto `sys.path` — the same gotcha the scripts note describes.
+- **`demo/build_dashboard.py` → `demo/dashboard.html`** — a self-contained
+  dark-theme page whose every value is read from `transcript.txt` and
+  `stress_results.json`. It renders what the tool did; it asserts nothing
+  that was not executed. Rebuild it after re-running either demo.
+
+Also this round: the mutation gate went 20/20 → 21/21 (the refused-
+`tools/call` mutant), the E501 in the mutation anchor was fixed by splitting
+the literal (content byte-identical), `scripts/stdio_check.py` was reformatted
+(no anchors target it), and `pyproject.toml` gained two scoped
+`per-file-ignores` with rationale (`demo/stress_demo.py` S105 for the decoy
+secret, `demo/build_dashboard.py` E501 for inline HTML). Full gates re-run
+green this round: 370/370 tests, 46/46 evals, stdio, smoke, parity,
+zero-dependency, ruff, bandit -ll, mutation 21/21.
+
+**Environment correction:** the interpreter the gates require is the hermes
+venv (`C:\Users\ASUS\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe`)
+— it is the one that has `mcp`, `anyio`, `pydantic` and `opentelemetry`. A
+bare `python` on this machine resolves to a managed 3.13 without them and
+reports 15 phantom import errors and 78 skips. Every command in "How to run
+the gates" means that interpreter.
 
 ## What the five requested items actually are
 
@@ -179,6 +223,57 @@ Verified in both directions: with the fix reverted the gate prints
 than be told, and could not tell that from a wedged server"*, and with the fix in
 place it passes.
 
+## Found this cycle — three, by running it rather than reading it
+
+**A guard that accuses itself.** `tests/test_integrity.py` sweeps `tests/*.py`
+for `def test_*` no runner can reach, and its negative control *wrote its control
+file into that same directory*. Two things then read it: discovery collected its
+`test_a_real_one` as a real test (the count read 371 instead of 370), and the
+sweep globbed it as a real file and failed — naming, as a dead test, the file the
+guard itself had just created. It passed on a clean run because `addCleanup`
+deleted the file, so the defect only appeared when a run was **interrupted** and
+the file survived: from then on every later run failed here. Found because the
+baseline was re-established and the suite re-run, not because anyone reasoned
+about it. Fixed by taking source text instead of a path, so the control is never
+written to disk at all. A control that must be cleaned up cannot be relied on to
+be.
+
+**`_refuse` was dead code, and dead for a reason.** Its docstring said "every
+refusal path funnels through here". No path did. It called
+`AUDIT.record(..., tool=...)`, and `AuditLog.record` has no `tool` parameter, so
+its first call would have raised `TypeError` — which is *why* nothing called it.
+Meanwhile `verify_network_output` re-implemented the translation inline, and the
+inline version put the **caller's raw command id** into the
+`netverify.refusal.command` metric label. For `not_in_allowlist` that id is
+whatever the caller invented, which is precisely the unbounded-cardinality hole
+`ScopeError.command`'s own docstring exists to close: one fresh name per request
+is one new metric series per request. The guard was real and tested in the
+library, and the adapter walked around it. Both fixed by making `_refuse` work
+and calling it; the audit line keeps what was attempted (prose, unbounded is
+fine there) while the metric gets the bounded label.
+
+**The refusal carried no reason code on the wire.** `ScopeError.reason` reached
+the metrics and nothing else — the model received a sentence of prose and had to
+parse it to decide whether to correct an argument, back off, or give up, which is
+exactly where this project says meaning must not live. Refusal text now carries
+`[reason=...]`, from both the single tool and `verify_capture`'s per-entry
+results.
+
+### And the gate that should have caught it
+
+`scripts/stdio_check.py` asked `skills/get` for a URI naming nothing — the call
+that found the silence bug — but had **never asked a refused `tools/call`**. Same
+question, same transport, and `ScopeError` is a `ValueError`, the exact type
+whose escape cost `skills/get` its response. It is now asked, and it was made to
+go red first: with the translation removed the gate reports *"tools/call for a
+mutating command produced NO response; a client would hang rather than be
+refused"*, and the server then stops answering altogether. Pinned by mutation
+#21.
+
+`resources/read` was probed the same way and is sound: `skill://nope/SKILL.md`,
+a traversal (`skill://triage-backbone/../README.md`), and a missing file all
+answer `-32602` rather than nothing.
+
 **A toothless mutation.** The `findings` mutation was anchored on `findings = ()` —
 an initialiser the next line reassigns, so mutating it changed nothing and the
 harness reported a survivor. Re-anchored on the assignment. Two mutations were
@@ -187,12 +282,21 @@ route row to a substring), both of which the new table catches.
 
 ## Work queued, in order
 
-1. **Nothing above is uncommitted** - commit before starting anything new.
-2. Scratch files `mut.txt`, `o*.txt`, `pid.txt` in the repo root are runner
-   output, not source. Do not commit them.
+1. ~~**Nothing above is uncommitted**~~ — false when this was written: `demo/`
+   was untracked, so the tree was not clean and the claim above it was wrong.
+   `demo/` is real content (a wrap-up demonstration, `demo/wrap_up_demo.py`,
+   exits 0) and is committed, not deleted.
+2. ~~Scratch files `mut.txt`, `o*.txt`, `pid.txt`~~ — none of them exist. The
+   only untracked thing in the root was `demo/`. Do not carry this forward.
 3. If progress notifications are ever extended to another tool, the two bridges
    in `_progress_reporter` are the reusable part; do not move that logic into
    the library.
+4. **`build/` poisoned the wheel gate.** A run interrupted mid-build leaves
+   `build/bdist.win-amd64/wheel/netverify-1.2.0.dist-info` behind, and the *next*
+   run then fails with `[WinError 183] Cannot create a file that already exists`
+   — a stale artefact masquerading as a packaging bug. Remove `build/` and
+   `netverify.egg-info/` before the wheel gate, not after. See "Environment
+   gotchas".
 
 ## Previously-planned work (superseded)
 
@@ -202,57 +306,38 @@ counters and histograms as well.
 
 ## Next work, in order
 
-### 1. Metrics (`netverify/telemetry.py`)
+Everything that used to be listed here — metrics, the adversarial finding
+counters, progress notifications, `cache_hints` and the payload guard — is
+**done**, and the list above was left behind by it. Kept once, below, so the
+change is visible rather than silent; do not re-plan it.
 
-Add OTel counters and histograms alongside the existing spans. Aggregate
-questions are the ones traces cannot answer — during an incident you need
-"failure rate by command across 400 interfaces", not "what happened to this
-call".
+### Superseded (all five landed)
 
-Suggested instruments:
+1. Metrics — `netverify/telemetry.py`, five instruments sharing the `ATTR_*`
+   vocabulary.
+2. Adversarial finding counters — `telemetry.record_findings` from
+   `sanitize.scan`; the differentiator, because no generic MCP server treats its
+   own tool output as untrusted.
+3. Progress notifications — `verify_many(progress=...)`, bridged in the adapter.
+4. `cache_hints` — declared for all six cacheable methods.
+5. Telemetry payload guard — `tests/test_telemetry_payloads.py`, spans and
+   metrics.
 
-- `netverify.verdicts` counter, attributes `command_id` + `outcome`
-  (`pass` / `fail` / `input_error`)
-- `netverify.findings` counter, attributes `kind` + `severity`
-- `netverify.call.duration` histogram, attributes `tool`
-- `netverify.rate_limited` counter
-- `netverify.refused` counter, attributes `reason`
+### Queued now
 
-Keep the existing `ATTR_*` names as the single source of truth for the
-vocabulary — a telemetry vocabulary defined only at call sites drifts, and
-dashboards then quietly stop matching.
-
-### 2. Adversarial finding counters (the differentiator)
-
-Item 1 is the one worth doing properly. Because the library treats device output
-as hostile, findings-by-kind are a **security signal**, not a perf metric: a
-spike in `verdict_coercion` or `exfiltration` across a fleet means someone is
-attempting prompt injection against your infrastructure.
-
-No generic MCP server has this metric, because no generic MCP server treats its
-tool output as untrusted. It maps to the `prompt injection / PII / HITL / audit`
-line in the $175K posting recorded in `C:\AIR\03 - Research\Evidence\Evidence - Agentic Era Skills.md`.
-
-### 3. Progress notifications
-
-`verify_capture` is the slow path. `ctx.report_progress(progress, total, message)`
-is available in `mcp/server/mcpserver/context.py:113` and unused. Roughly one
-line. Verify the progress token is honoured by a client before claiming it works.
-
-### 4. `cache_hints` and the telemetry payload guard
-
-`MCPServer.__init__` accepts `cache_hints: Mapping[CacheableMethod, CacheHint]`.
-We already return tools in a deterministic order *for* cache friendliness
-(tools/list is a SEP-2549 cacheable method) — declaring the hint is the missing
-half of work already half-done.
-
-**The payload guard matters more than the cache hint.** The audit log has
-`test_never_records_the_payload`. Telemetry does not. Enabling an OTel exporter
-moves data *out of the process* to a collector, which changes the trust boundary
-that "we never log payloads" currently depends on. `Finding.detail` is a
-description rather than matched text, so the code is on the right side of that
-line — but it is currently an accident, not an invariant. Add a test that fails
-if anyone puts raw text into a span attribute.
+1. **`prompts/get` has never been asked over the wire.** `stdio_check.py` lists
+   prompts and never fetches one, so the rendered messages are unverified on the
+   transport an agent actually uses. Probed and working; not yet pinned.
+2. **`resources/list` is not asked over the wire either.** The gate reads one
+   skill by exact URI, so a registration change that dropped skills from the
+   listing would still pass.
+3. **The adapter still has two refusal shapes.** `verify_capture` builds its
+   per-entry `{"refused": ...}` string itself, while a single tool call goes
+   through `_refuse`. They now agree on the reason code, but the duplication is
+   the same class of drift `_refuse` was written to end. Consider one helper for
+   both.
+4. **Revoke and rotate the PATs** pasted into earlier chat sessions, before any
+   publication. Carried forward; still not done.
 
 
 ## MCP capability surface — full status
@@ -269,9 +354,9 @@ Verified against `mcp` 2.2.0 and spec revision **2026-07-28**.
 | Structured output | done | declared schema per tool |
 | Rate limiting | done | token bucket, burst derived from `MAX_BATCH_ITEMS` |
 | Audit logging | done | JSONL on **stderr** (stdout is the protocol channel) |
-| Progress | **todo** | `ctx.report_progress` unused |
-| `cache_hints` | **todo** | not declared |
-| Metrics | **todo** | none |
+| Progress | done | `verify_many(progress=...)`; 3 notifications seen on stdout |
+| `cache_hints` | done | `server/app.py:CACHE_HINTS`, all six cacheable methods |
+| Metrics | done | 5 instruments; `metrics_state` reported by `self_check` |
 | Resource templates | not used | if added, `ResourceSecurity` (traversal / absolute path / **NUL bytes**) becomes live — `mcp/server/mcpserver/resources/templates.py` |
 | Tasks | not used | ext id `io.modelcontextprotocol/tasks`; `tasks/get` + `tasks/update`, no `tasks/list`. Nothing is long-running yet |
 | MCP Apps | not used | wrong shape for a verifier |
@@ -372,7 +457,14 @@ python -m bandit -q -r netverify server scripts -ll -x netverify\parsers
   bootstrap it explicitly.
 - `build/` and `netverify.egg-info/` are untracked artefacts from the wheel
   gate. They are not source; **do not read `build/lib/` to learn the current
-  shape of the code** — it is a stale copy.
+  shape of the code** — it is a stale copy, and it is stale in a way that bites:
+  a wheel run interrupted part-way leaves
+  `build/bdist.win-amd64/wheel/netverify-1.2.0.dist-info` on disk, and the next
+  run then dies with `[WinError 183] Cannot create a file that already exists`
+  while reporting `could not build a wheel; is setuptools available?`. That reads
+  as a toolchain problem and is nothing of the kind. **Remove `build/` before
+  the wheel gate**, and treat "stale build artefact" as a suspected cause of any
+  packaging failure, not as housekeeping to do afterwards.
 - **Never edit a UTF-8 file with `Get-Content | Set-Content -Encoding UTF8`.**
   PowerShell 5.1 reads it as cp1252 and re-encodes, so every non-ASCII
   character is double-encoded. The result is still *valid* UTF-8, so a
@@ -393,10 +485,12 @@ python -m bandit -q -r netverify server scripts -ll -x netverify\parsers
 
 ## Committed this cycle
 
-The current cycle (`fd21b69` through `31939c2`) is fully represented by the
-latest commit subjects:
+The current cycle (`fd21b69` through `603fc60`) is fully represented by the
+latest commit subjects. The previous handoff stopped at `31939c2` and so omitted
+the most recent one:
 
 ```sh
+603fc60 Reconcile the handoff with the code it claims to describe
 31939c2 Ask for a skill that is not there, and the answer was silence.
 669b647 Read a verdict as "down" and you page someone at 3am about a healthy link. Read it as "healthy" and you hide a dead one. Both are wrong, and the first version of this fix traded the first for the second.
 e73ad9a Stop reporting a fault for text the tool never saw

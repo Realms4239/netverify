@@ -234,6 +234,21 @@ MUTATIONS: list[tuple[str, str, str, str, bool]] = [
         "an unknown skill URI is refused with silence instead of a JSON-RPC error",
         False,
     ),
+    (
+        # The tool-side twin of the bug above, and the reason `_refuse` is no
+        # longer dead code. `ScopeError` is a `ValueError`, so letting it escape
+        # the handler is not "a different error" - over stdio it is *no response
+        # at all*, and the client cannot tell a refused command from a wedged
+        # server. Verified in both directions: with this mutant the stdio gate
+        # reports "produced NO response; a client would hang rather than be
+        # refused" and then the server stops answering entirely.
+        "server/app.py",
+        "        raise _refuse(exc, attempted=command if isinstance(command, str)"
+        " else None) from exc",
+        "        raise  # MUTANT: the refusal never becomes a tool error",
+        "a refused command id is answered with silence instead of a tool error",
+        False,
+    ),
 ]
 
 

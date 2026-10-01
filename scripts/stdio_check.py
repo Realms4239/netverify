@@ -347,6 +347,80 @@ def main() -> int:
             if not survivors:
                 failures.append("skills/list answered after the refusal, but with no catalogue")
 
+        # A refused *tool* call, which until now had never been asked over the
+        # wire. The gap matters for the same reason the skills block does, and
+        # the reason is not symmetry: `ScopeError` is a `ValueError`, which is
+        # exactly the type whose escape already cost `skills/get` its response.
+        # Only `ToolError` from `_refuse` stands between a refused command id and
+        # a client that waits out its own timeout. In-process that conversion is
+        # invisible either way - the test catches the `ScopeError` and passes -
+        # so this question can only be asked here.
+        process.stdin.write(
+            _frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "_meta": dict(CLIENT_META),
+                        "name": "verify_network_output",
+                        "arguments": {"command": "configure terminal", "output": "anything"},
+                    },
+                }
+            )
+        )
+        process.stdin.flush()
+        tool_watchdog = threading.Timer(REFUSAL_TIMEOUT, process.kill)
+        tool_watchdog.start()
+        refused_tool = process.stdout.readline()
+        tool_watchdog.cancel()
+        if not refused_tool:
+            failures.append(
+                "tools/call for a mutating command produced NO response; a client would "
+                "hang rather than be refused, and could not tell that from a wedged server"
+            )
+        else:
+            try:
+                answer = json.loads(refused_tool.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                failures.append(f"the refused tool call was not JSON-RPC: {exc}")
+            else:
+                result = answer.get("result") or {}
+                if not result.get("isError"):
+                    failures.append(
+                        "a mutating command id was not reported as a tool error, so the "
+                        f"model is given no refusal to correct: {answer}"
+                    )
+                # The stable reason code, not prose. Grouping by prose is how a
+                # dashboard stops matching, and the whole point of `REASON_*` is
+                # that a client can branch on it.
+                blob = json.dumps(result)
+                if "not_in_allowlist" not in blob:
+                    failures.append(
+                        "the refusal does not carry its stable reason code, so a client "
+                        f"cannot tell why it was refused: {blob[:200]!r}"
+                    )
+                if "configure terminal" in blob and "not in the allowlist" not in blob:
+                    # Belt and braces: the refusal must not quote the rejected
+                    # command back as though it were accepted.
+                    failures.append(f"the refusal reads as an acceptance: {blob[:200]!r}")
+
+        # A refused tool call has to be as survivable as a refused skill: one
+        # more ordinary request, after the error.
+        process.stdin.write(_request(10, "tools/list"))
+        process.stdin.flush()
+        after_refusal = process.stdout.readline()
+        try:
+            still = json.loads(after_refusal.decode("utf-8"))["result"]["tools"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, UnicodeDecodeError) as exc:
+            failures.append(
+                f"the server stopped answering after a refused tools/call: "
+                f"{exc or 'no response at all'}"
+            )
+        else:
+            if not still:
+                failures.append("tools/list answered after the refusal, but with no tools")
+
         # Progress notifications, over the real wire, with a real token. This has
         # to live here for the same reason the audit correlation below does: the
         # unit tests drive the tool function and the SDK's worker thread, but
@@ -479,7 +553,12 @@ def main() -> int:
                 # caused it, and that an uncorrelated record is visible.
                 mine = [e for e in entries if e.get("request_id") == "77"]
                 uncorrelated = [e for e in entries if e.get("request_id") is None]
-                unknown = [e for e in entries if e.get("request_id") not in (None, "77", "78")]
+                # "9" is the refused `tools/call` above. It is expected to write
+                # an audit line - a refusal is exactly what an operator wants in
+                # the log - so it belongs in the set of ids this script itself
+                # issued. Leaving it out made the correlation check fail on its
+                # own new request rather than on a real mis-correlation.
+                unknown = [e for e in entries if e.get("request_id") not in (None, "9", "77", "78")]
                 if not mine:
                     failures.append(f"no audit line carries request_id 77: {entries}")
                 if uncorrelated:
@@ -526,6 +605,7 @@ def main() -> int:
     print("  resources/read served the skill as text, not base64")
     print("  skills/list returned the catalogue, and skills/get resolved an unlisted URI")
     print(f"  an unknown skill URI was refused with {INVALID_PARAMS}, and the server kept serving")
+    print("  a refused tools/call was answered, not left silent, and carried its reason code")
     return 0
 
 

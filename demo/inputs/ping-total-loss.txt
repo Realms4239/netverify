@@ -1,0 +1,1 @@
+3 packets transmitted, 0 received, 100% packet loss
