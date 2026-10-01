@@ -1,5 +1,7 @@
 # netverify
 
+[![CI](https://github.com/Realms4239/netverify/actions/workflows/ci.yml/badge.svg)](https://github.com/Realms4239/netverify/actions/workflows/ci.yml)
+
 **Verify ISP backbone device output — with no device credentials.**
 
 A zero-dependency Python library and a read-only MCP server that turn raw SR
