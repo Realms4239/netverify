@@ -96,6 +96,22 @@ that proves a server must not itself be a liability:
   cursor, so concurrent calls used to read each other's spans and counter
   deltas (a stress harness caught a 3-span call reporting 28). Calls and
   bootstrap are serialized under one lock; attribution is now exact.
+- **The exporter is bounded** (`MAX_SPANS = 2000`, newest kept): sustained
+  load showed `spans_recorded` climbing with no plateau — a leak, slow but
+  real. Index cursors cannot survive a wrapping buffer, so attribution
+  moved to span-id windows: a call marks the last 50 span ids and reads
+  back only the spans newer than that mark. The dashboard chip reads
+  "Spans (recent)" because that is what the number now is.
+- **One malformed stdin line cannot wedge the stdio session**
+  (`server/framing.py`): the SDK's stdin reader sends its parser's
+  exception object into the read stream, and the session answers
+  exceptions with silence — after one garbage line `tools/list` is never
+  answered again while the process looks healthy. The guard validates each
+  line with the SDK's own validator, passes protocol lines through, and
+  rewrites garbage into a well-formed request (`_netverify/parse_error`,
+  id −1) the server refuses with a real −32601 error: the client is told,
+  stdout stays pure JSON-RPC, the session survives. The wire gate probes
+  it: garbage and `tools/list` on one pipe, both answered.
 - **The Host header must be this console's** (`127.0.0.1:8765` or
   `localhost:8765`): DNS rebinding lets a web page point a name it owns at
   127.0.0.1 and, same-origin rules satisfied, read responses and invoke

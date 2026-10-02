@@ -56,7 +56,9 @@ alongside `favicon.svg` from a fixed whitelist. Endpoints:
 - **`POST /api/call`** `{kind, name, arguments}` — one real JSON-RPC
   round-trip (`kind` is `tool`, `resource` or `prompt`). Returns the
   structured/text result, `elapsed_ms`, the OpenTelemetry spans this call
-  produced (sliced by exporter cursor), and the metric counters that moved.
+  produced (attributed by span-id window: the call marks the last 50 span
+  ids and reads back the newer ones, exact under the call lock), and the
+  metric counters that moved.
   A refusal comes back as `is_error: true` with `[reason=...]` in the text.
 - **`POST /api/stdio-proof`** — spawns `python -m server` as a real
   subprocess, pipes newline-delimited JSON-RPC to its stdin, and returns
@@ -65,8 +67,10 @@ alongside `favicon.svg` from a fixed whitelist. Endpoints:
   refused `tools/call` (asserted as *an answer, not silence*), `prompts/list`,
   `skills/list`, and an unknown tool name (must be answered with an error,
   never silence). One proof runs at a time; an overlapping request gets 409.
-- **`GET /api/telemetry`** — spans (newest slice), collected metrics, and the
-  library's telemetry status, for the page's 3-second poll.
+- **`GET /api/telemetry`** — the 120 most recent spans, collected metrics,
+  and the library's telemetry status, for the page's 3-second poll. The
+  exporter is bounded (`MAX_SPANS = 2000`, newest kept): `spans_recorded`
+  is the bounded recent count, and the page's chip reads "Spans (recent)".
 - **`GET /api/health`** — measured service status only: protocol version,
   session kind, uptime.
 

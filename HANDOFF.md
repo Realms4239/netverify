@@ -162,6 +162,51 @@ The interpreter note above applies to the live server too: it is the hermes
 venv or nothing, and `python -m server` inside the wire proof resolves from
 its cwd (the repo root), never `sys.path[0]`.
 
+### Stress round 2 (longevity: the leak and the wedge)
+
+A second 6-probe harness (sustained load at cap, keep-alive reuse, header
+abuse, all-tool adversarial fuzz, child-process hygiene, wire robustness)
+ran against the live server and found two real defects, both fixed in
+`0971958` and re-proven on the wire:
+
+1. **The span exporter leaked.** Sustained load showed `spans_recorded`
+   climbing with no plateau — unbounded growth, slow but real. The
+   in-memory exporter is now bounded (`MAX_SPANS = 2000` in
+   `demo/obs.py`, newest kept): the probe prefill reaches the cap and the
+   count plateaus at exactly 2000 under another 40 s of load, zero errors,
+   p50 flat at ~16 ms first and last. Index cursors cannot survive a
+   wrapping buffer, so `snapshot_spans(since)` / `reset_span_cursor()` are
+   gone; attribution moved to span-id windows — `recent_span_ids(50)`
+   marks a call, `new_spans_since(prefix_ids)` reads it back, and the
+   round-1 exact-attribution probe still passes (9/9). The dashboard chip
+   reads "Spans (recent)" because that is what the number now is.
+2. **One malformed stdin line wedged the stdio session.** The SDK's
+   reader sends its parser's *exception object* into the read stream and
+   the session answers exceptions with silence: after one garbage line,
+   `tools/list` never answers again while the process looks healthy
+   (empirically proven before the fix). `server/framing.py` interposes a
+   guard between wire and SDK: lines are validated with the SDK's own
+   validator, protocol lines pass through untouched, and garbage is
+   rewritten into a well-formed request (`_netverify/parse_error`, id −1)
+   the server refuses with a real −32601 — the client is told, stdout
+   stays pure JSON-RPC, the session survives. The wire gate now sends
+   garbage + `tools/list`(11) on one pipe and asserts both are answered.
+
+Two harness notes worth keeping: a `_meta` envelope with only
+`protocolVersion` is correctly refused −32602 (the `clientCapabilities`
+key is required), which reads like a wire failure if the probe sends a
+minimal envelope; and a fresh child's cold start can outrun a short
+read window (the first spawn of a session can take tens of seconds), so a
+probe that sees silence may just have started the interpreter. Probe 6
+carries both lessons in its comments now.
+
+Evidence at commit time: unittest 370 green on three consecutive runs
+(one earlier one-off failure never reproduced — flaky, not fixed);
+stress2 6/6; stress 9/9; p1_verify 11/11; p2_browser 10/10 with the
+relabelled chip; stdio_check OK including the malformed-line probe;
+wheel and dependency gates green; ruff clean. CI green on `0971958`
+(mutation 21/21 verified in the step log).
+
 ## What the five requested items actually are
 
 Two of the five were **already done**. Verified, not assumed — check before
