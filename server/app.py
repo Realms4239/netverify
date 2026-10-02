@@ -29,12 +29,14 @@ which is why nothing here holds per-session data.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
 import time
 import warnings
 from typing import Annotated, Any
 
+import anyio
 import anyio.from_thread
 from mcp.server.caching import CacheHint
 from mcp.server.context import CallNext, ServerMiddleware, ServerRequestContext
@@ -74,6 +76,7 @@ from netverify.errors import (
 )
 from netverify.telemetry import record_duration, record_rate_limited, record_refused
 from netverify.verify import ProgressFn
+from server.framing import framing_guard
 
 from .prompts import register as register_prompts
 from .skills import SKILL_SCHEME, Skill, SkillsExtension, load_skills
@@ -1124,7 +1127,26 @@ def main() -> None:
     elif str(metrics["metrics_state"]).startswith("failed:"):
         print(f"netverify: metrics NOT exported - {metrics['metrics_state']}", file=sys.stderr)
 
-    build_server().run()
+    server = build_server()
+
+    async def _serve_stdio() -> None:
+        # The framing guard is the stdin the SDK asked for: one malformed line
+        # on the wire otherwise reaches the session as a parser exception, and
+        # the session answers exceptions with silence - every later request
+        # hangs while the process looks healthy. See server/framing.py.
+        from mcp.server.stdio import stdio_server
+
+        lowlevel = server._lowlevel_server  # noqa: SLF001 - the guarded transport is this file's job
+        stdin_text = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
+        guarded = framing_guard(anyio.wrap_file(stdin_text))
+        async with stdio_server(stdin=guarded) as (read_stream, write_stream):
+            await lowlevel.run(
+                read_stream,
+                write_stream,
+                lowlevel.create_initialization_options(),
+            )
+
+    anyio.run(_serve_stdio)
 
 
 if __name__ == "__main__":

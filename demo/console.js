@@ -274,7 +274,7 @@ function renderProof(d) {
 function renderTelStatus(s) {
   const items = [
     ["Tracer", s.tracer], ["Meter", s.meter], ["Metrics state", s.metrics_state],
-    ["Host provider", s.host_provider], ["Spans collected", s.spans_recorded],
+    ["Host provider", s.host_provider], ["Spans (recent)", s.spans_recorded],
     ["SDK SERVER spans", s.sdk_emits_server_spans ? "yes" : "no"],
   ];
   $("tel-status").innerHTML = items.map(([k, v]) =>

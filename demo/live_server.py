@@ -219,7 +219,9 @@ def bootstrap() -> dict:
 def do_call(kind: str, name: str, arguments: dict) -> dict:
     """One real round-trip, with the spans it produced and the metrics it moved."""
     with _CALL_LOCK:
-        cursor = obs.reset_span_cursor()
+        # The window marker is a set of span ids, not an index: the exporter is
+        # a bounded deque, so an absolute cursor goes stale the moment it wraps.
+        prefix_ids = obs.recent_span_ids(50)
         before_metrics = {
             (m["name"], tuple(sorted(m["attributes"].items()))): m for m in obs.snapshot_metrics()
         }
@@ -262,7 +264,7 @@ def do_call(kind: str, name: str, arguments: dict) -> dict:
             }
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
 
-        spans, _total = obs.snapshot_spans(cursor)
+        spans = obs.new_spans_since(prefix_ids)
         after = obs.snapshot_metrics()
         deltas = []
         for m in after:
@@ -592,11 +594,11 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 )
             elif self.path == "/api/telemetry":
-                spans, total = obs.snapshot_spans()
+                recent = obs.recent_spans(120)
                 self._json(
                     {
-                        "spans": spans[-120:],
-                        "total_spans": total,
+                        "spans": recent,
+                        "total_spans": len(recent),
                         "metrics": obs.snapshot_metrics(),
                         "status": obs.telemetry_status(),
                     }

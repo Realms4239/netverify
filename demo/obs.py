@@ -40,7 +40,12 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E4
 )
 
 #: Module-level, so the HTTP layer can read what the process recorded.
-span_exporter = InMemorySpanExporter()
+#: Bounded on purpose: the exporter holds every span it is given, and a
+#: console left running for days would otherwise grow without limit - a
+#: stress harness measures the growth, not the intention. 2000 spans is
+#: roughly the last hour of active use; /api/telemetry serves the newest 120.
+MAX_SPANS = 2000
+span_exporter = InMemorySpanExporter(max_spans=MAX_SPANS)
 metric_reader = InMemoryMetricReader()
 
 _provider = TracerProvider(resource=None)
@@ -57,32 +62,51 @@ import netverify.telemetry as telemetry  # noqa: E402
 telemetry.reset_instruments()
 
 
-def snapshot_spans(since: int = 0) -> list[dict]:
-    """Serialise finished spans from index `since`, oldest first.
+def _serialise(span) -> dict:
+    ctx = span.get_span_context()
+    start_ns = span.start_time or 0
+    end_ns = span.end_time or start_ns
+    return {
+        "name": span.name,
+        "trace_id": format(ctx.trace_id, "032x"),
+        "span_id": format(ctx.span_id, "016x"),
+        "parent_id": format(span.parent.span_id, "016x") if span.parent else None,
+        "duration_ms": round((end_ns - start_ns) / 1_000_000, 3),
+        "t": time.strftime("%H:%M:%S", time.localtime(start_ns / 1e9)),
+        "attributes": {k: v for k, v in dict(span.attributes or {}).items()},
+    }
 
-    Attributes are passed through as the SDK recorded them. The library's
-    payload discipline (tests/test_telemetry_payloads.py) guarantees no span
-    attribute carries raw device output or a matched secret, so forwarding
-    them to a dashboard cannot leak what the suite says they cannot contain.
+
+def recent_spans(limit: int = 120) -> list[dict]:
+    """Serialise the most recent spans, oldest first, bounded by `limit`."""
+    spans = span_exporter.get_finished_spans()
+    return [_serialise(s) for s in spans[-limit:]]
+
+
+def recent_span_ids(count: int = 50) -> set[str]:
+    """The span ids of the last `count` spans: a window's "before" marker."""
+    spans = span_exporter.get_finished_spans()
+    return {format(s.get_span_context().span_id, "016x") for s in spans[-count:]}
+
+
+def new_spans_since(prefix_ids: set[str]) -> list[dict]:
+    """Spans that arrived after `prefix_ids` was taken, oldest first.
+
+    The exporter is a bounded deque, so index cursors break the moment it
+    wraps: `len` stops growing and an absolute slice goes stale. Span ids are
+    content-free and collision-proof, so the window is marked by the ids
+    present before the call and read back by walking the newest spans until
+    one of those ids appears. Emission happens only inside the caller's lock,
+    so the tail is exactly the window's work.
     """
     spans = span_exporter.get_finished_spans()
-    out = []
-    for span in spans[since:]:
-        ctx = span.get_span_context()
-        start_ns = span.start_time or 0
-        end_ns = span.end_time or start_ns
-        out.append(
-            {
-                "name": span.name,
-                "trace_id": format(ctx.trace_id, "032x"),
-                "span_id": format(ctx.span_id, "016x"),
-                "parent_id": format(span.parent.span_id, "016x") if span.parent else None,
-                "duration_ms": round((end_ns - start_ns) / 1_000_000, 3),
-                "t": time.strftime("%H:%M:%S", time.localtime(start_ns / 1e9)),
-                "attributes": {k: v for k, v in dict(span.attributes or {}).items()},
-            }
-        )
-    return out, len(spans)  # type: ignore[return-value]
+    collected: list = []
+    for span in reversed(spans):
+        if format(span.get_span_context().span_id, "016x") in prefix_ids:
+            break
+        collected.append(span)
+    collected.reverse()
+    return [_serialise(s) for s in collected]
 
 
 def snapshot_metrics() -> list[dict]:
@@ -115,14 +139,13 @@ def snapshot_metrics() -> list[dict]:
 
 
 def telemetry_status() -> dict:
-    """The library's own status, plus what this process demonstrably has."""
+    """The library's own status, plus what this process demonstrably has.
+
+    `spans_recorded` is the size of the bounded recent window (at most
+    `MAX_SPANS`), not a lifetime count - a leak would be exactly the thing
+    this number refused to do.
+    """
     status = dict(telemetry.status())
-    spans = span_exporter.get_finished_spans()
-    status["spans_recorded"] = len(spans)
+    status["spans_recorded"] = len(span_exporter.get_finished_spans())
     status["host_provider"] = "in-memory (collected by this dashboard)"
     return status
-
-
-def reset_span_cursor() -> int:
-    """The index a caller should pass as `since` to see only new spans."""
-    return len(span_exporter.get_finished_spans())

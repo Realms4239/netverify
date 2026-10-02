@@ -421,6 +421,43 @@ def main() -> int:
             if not still:
                 failures.append("tools/list answered after the refusal, but with no tools")
 
+        # A malformed line - not JSON at all - used to reach the session as a
+        # parser exception, and the session answered exceptions with silence:
+        # every later request hung while the process looked healthy. A log
+        # line on the wrong pipe is all it takes. The framing guard
+        # (server/framing.py) rewrites such a line into a request the server
+        # refuses properly, so this asks the question only the real transport
+        # can answer: garbage in, an answer out (id -1 first, then id 11),
+        # and the connection still alive.
+        process.stdin.write(b"this is not json at all\n")
+        process.stdin.flush()
+        process.stdin.write(_request(11, "tools/list"))
+        process.stdin.flush()
+        after_garbage = None
+        for _ in range(4):
+            line = process.stdout.readline()
+            if not line:
+                break
+            try:
+                message = json.loads(line.decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                failures.append(f"stdout carried non-JSON after a malformed line: {line[:120]!r}")
+                break
+            if message.get("id") == 11:
+                after_garbage = message
+                break
+        try:
+            survivors = after_garbage["result"]["tools"]
+        except (KeyError, IndexError, TypeError) as exc:
+            failures.append(
+                f"the server never answered tools/list after a malformed line: "
+                f"{exc or 'no response at all'} - a client would hang rather than "
+                "be told, and could not tell that from a wedged server"
+            )
+        else:
+            if not survivors:
+                failures.append("tools/list answered after a malformed line, but with no tools")
+
         # Progress notifications, over the real wire, with a real token. This has
         # to live here for the same reason the audit correlation below does: the
         # unit tests drive the tool function and the SDK's worker thread, but
@@ -606,6 +643,7 @@ def main() -> int:
     print("  skills/list returned the catalogue, and skills/get resolved an unlisted URI")
     print(f"  an unknown skill URI was refused with {INVALID_PARAMS}, and the server kept serving")
     print("  a refused tools/call was answered, not left silent, and carried its reason code")
+    print("  a malformed (non-JSON) line was answered and the connection kept serving")
     return 0
 
 
